@@ -1,0 +1,36 @@
+name: ME7Mobile
+options:
+  bundleIdPrefix: com.oleg
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+targets:
+  ME7Mobile:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources
+        buildPhase: resources
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: ME7Mobile
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSLocalNetworkUsageDescription: "Подключение к Wi-Fi адаптеру ELM327 (192.168.0.10) для связи с блоком двигателя"
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.oleg.me7mobile
+        TARGETED_DEVICE_FAMILY: "1"

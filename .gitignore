@@ -1,0 +1,5 @@
+build/
+Payload/
+*.ipa
+ME7Mobile.xcodeproj/
+Info.plist
