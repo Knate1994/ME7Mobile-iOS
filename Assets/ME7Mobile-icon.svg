@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#07121e"/><stop offset=".55" stop-color="#10253a"/><stop offset="1" stop-color="#07131f"/></linearGradient>
+  <radialGradient id="halo"><stop stop-color="#0d8092" stop-opacity=".30"/><stop offset="1" stop-color="#00d3ce" stop-opacity="0"/></radialGradient>
+  <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#54f3e6"/><stop offset="1" stop-color="#167cb3"/></linearGradient>
+  <linearGradient id="needle" x1="0" y1="1" x2="1" y2="0"><stop stop-color="#ff9b5f"/><stop offset="1" stop-color="#ffd08c"/></linearGradient>
+  <filter id="soft" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="20"/></filter>
+</defs>
+<rect width="1024" height="1024" fill="url(#bg)"/>
+<circle cx="512" cy="470" r="420" fill="url(#halo)"/>
+<circle cx="512" cy="470" r="286" fill="#27ddd0" opacity=".10" filter="url(#soft)"/>
+<g stroke="url(#edge)" stroke-width="18" stroke-linecap="round" opacity=".9">
+  <path d="M177 306h74M177 397h74M177 488h74M177 579h74M177 670h74"/>
+  <path d="M773 306h74M773 397h74M773 488h74M773 579h74M773 670h74"/>
+</g>
+<rect x="218" y="184" width="588" height="656" rx="104" fill="#0b1928" stroke="#1e475b" stroke-width="12"/>
+<rect x="234" y="200" width="556" height="624" rx="88" fill="none" stroke="#102b3c" stroke-width="3"/>
+<circle cx="512" cy="441" r="216" fill="#081522" stroke="#19374a" stroke-width="15"/>
+<circle cx="512" cy="441" r="183" fill="none" stroke="#122a3c" stroke-width="28"/>
+<path d="M363 553 A186 186 0 1 1 661 553" fill="none" stroke="url(#edge)" stroke-width="25" stroke-linecap="round"/>
+<g stroke="#a5d9df" stroke-linecap="round" opacity=".78">
+  <path d="M356 519l26-9" stroke-width="10"/><path d="M353 420l28 2" stroke-width="9"/>
+  <path d="M391 325l23 17" stroke-width="9"/><path d="M469 270l7 29" stroke-width="9"/>
+  <path d="M565 270l-7 29" stroke-width="9"/><path d="M643 325l-23 17" stroke-width="9"/>
+  <path d="M671 420l-28 2" stroke-width="9"/><path d="M668 519l-26-9" stroke-width="10"/>
+</g>
+<path d="M512 441L624 338" stroke="url(#needle)" stroke-width="18" stroke-linecap="round"/>
+<circle cx="512" cy="441" r="27" fill="#f5fbff"/><circle cx="512" cy="441" r="12" fill="#1d7181"/>
+<text x="512" y="696" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-size="104" font-weight="800" letter-spacing="7" fill="#f4fbff">ME7</text>
+<path d="M367 728h290" stroke="url(#edge)" stroke-width="7" stroke-linecap="round"/>
+<text x="512" y="778" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-size="25" font-weight="700" letter-spacing="8" fill="#8fb8c5">ENGINE LOGGER</text>
+<circle cx="737" cy="256" r="17" fill="#54f3e6"/><circle cx="737" cy="256" r="31" fill="#54f3e6" opacity=".18"/>
+</svg>

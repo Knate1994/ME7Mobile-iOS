@@ -12,7 +12,9 @@ jobs:
 
       - name: Generate Xcode project
         run: |
-          brew install xcodegen
+          brew install xcodegen librsvg
+          mkdir -p Assets.xcassets/AppIcon.appiconset
+          rsvg-convert -w 1024 -h 1024 Assets/ME7Mobile-icon.svg -o Assets.xcassets/AppIcon.appiconset/AppIcon.png
           xcodegen generate
 
       - name: Build (unsigned, Sideloadly signs it with your Apple ID)
