@@ -807,7 +807,7 @@ final class Me7Link: ObservableObject {
         if hasActualBoost { extraNames.append("boost_actual_gauge"); extraUnits.append("mbar(g)") }
         if hasRequestedBoost { extraNames.append("boost_target_gauge"); extraUnits.append("mbar(g)") }
         w("TimeStamp," + (vars.map { $0.name } + extraNames).joined(separator: ",") + "\n")
-        w("s," + (vars.map { $0.unit } + extraUnits).joined(separator: ",") + "\n")
+        w("s," + (vars.map { $0.displayUnit } + extraUnits).joined(separator: ",") + "\n")
         let modeText: String
         switch plan.mode {
         case .ddli: modeText = "DDLI · \(plan.groups.count) блока"
@@ -908,7 +908,7 @@ final class Me7Link: ObservableObject {
             if now.timeIntervalSince(lastUi) > 0.15 {
                 lastUi = now
                 var snap = vars.indices.map { index in
-                    LiveValue(id: vars[index].name, label: vars[index].displayName, value: values[index], unit: vars[index].unit)
+                    LiveValue(id: vars[index].name, label: vars[index].displayName, value: values[index], unit: vars[index].displayUnit)
                 }
                 snap += derivedLive
                 let h = hz

@@ -39,6 +39,11 @@ struct Measurement: Identifiable, Hashable {
         return alias.isEmpty ? name : alias
     }
 
+    /// In the German ME7 definitions, °KW means degrees of crankshaft rotation.
+    var displayUnit: String {
+        unit.trimmingCharacters(in: .whitespaces) == "°KW" ? "° коленвала" : unit
+    }
+
     /// Human-readable names for the measurements most often used in live logging.
     /// The ME7Logger identifiers stay visible in the picker so every label can be
     /// checked against the ECU definition and the exported CSV.
