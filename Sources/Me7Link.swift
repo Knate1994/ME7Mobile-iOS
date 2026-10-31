@@ -11,7 +11,7 @@ struct Settings {
     var maxBytes = 64               // max data bytes in one 0x21 answer
 }
 
-enum LinkState { case idle, busy, ok, fail }
+enum LinkState: Equatable { case idle, busy, ok, fail }
 
 struct LiveValue: Identifiable {
     let id: String
@@ -35,6 +35,9 @@ final class Me7Link: ObservableObject {
     @Published var ecuText = "НЕ ПОДКЛЮЧЕНО"
     @Published var dtcState = LinkState.idle
     @Published var dtcText = "Не прочитаны"
+    @Published var moduleDiagnostics: [DtcModule: ModuleDiagnostic] = Dictionary(
+        uniqueKeysWithValues: DtcModule.allCases.map { ($0, ModuleDiagnostic()) }
+    )
     @Published var logging = false
     @Published var logText = ""
     @Published var live: [LiveValue] = []
@@ -45,6 +48,7 @@ final class Me7Link: ObservableObject {
     private var elm: Elm?
     private var traceFile: FileHandle?
     private var ecuOk = false
+    private var activeModule: DtcModule?
     private let flagLock = NSLock()
     private var runFlag = false
     private var running: Bool {
@@ -59,6 +63,23 @@ final class Me7Link: ObservableObject {
     private func setEcu(_ s: LinkState, _ text: String) { ui { self.ecuState = s; self.ecuText = text } }
     private func setDtc(_ s: LinkState, _ text: String) { ui { self.dtcState = s; self.dtcText = text } }
     private func setLog(_ r: Bool, _ text: String) { ui { self.logging = r; self.logText = text } }
+    private func updateModule(_ module: DtcModule, _ change: @escaping (inout ModuleDiagnostic) -> Void) {
+        ui {
+            var value = self.moduleDiagnostics[module] ?? ModuleDiagnostic()
+            change(&value)
+            self.moduleDiagnostics[module] = value
+        }
+    }
+
+    private func resetModules(_ text: String) {
+        ui {
+            self.moduleDiagnostics = Dictionary(uniqueKeysWithValues: DtcModule.allCases.map {
+                var value = ModuleDiagnostic()
+                value.connectionText = text
+                return ($0, value)
+            })
+        }
+    }
 
     private func t(_ s: String) {
         ui {
@@ -101,6 +122,7 @@ final class Me7Link: ObservableObject {
         ui { self.trace.removeAll() }
         job({ self.elmFail($0) }) {
             self.closeAll()
+            self.resetModules("Ожидание подключения")
             self.setEcu(.idle, "НЕ ПОДКЛЮЧЕНО")
             self.setElm(.busy, "Подключение к \(s.host):\(s.port)…")
             self.traceFile = self.openOutput("me7_\(self.stamp())_trace.txt")
@@ -135,6 +157,8 @@ final class Me7Link: ObservableObject {
         closeSocket()
         setElm(.fail, "НЕ ПОДКЛЮЧЕНО\n\(msg)")
         setEcu(.idle, "НЕ ПОДКЛЮЧЕНО")
+        activeModule = nil
+        resetModules("Нет соединения с адаптером")
     }
 
     func disconnect() {
@@ -143,11 +167,14 @@ final class Me7Link: ObservableObject {
             self.closeAll()
             self.setElm(.idle, "НЕ ПОДКЛЮЧЕНО")
             self.setEcu(.idle, "НЕ ПОДКЛЮЧЕНО")
+            self.activeModule = nil
+            self.resetModules("Не подключено")
         }
     }
 
     private func closeSocket() {
         ecuOk = false
+        activeModule = nil
         elm?.close()
         elm = nil
     }
@@ -173,6 +200,11 @@ final class Me7Link: ObservableObject {
         job({ self.ecuFail($0) }) {
             guard let e = self.elm else { self.ecuFail("сначала подключи ELM"); return }
             self.ecuOk = false
+            if let previous = self.activeModule, previous != .engine {
+                self.updateModule(previous) { $0.connectionState = .idle; $0.connectionText = "Сеанс закрыт при выборе двигателя" }
+            }
+            self.activeModule = nil
+            self.updateModule(.engine) { $0.connectionState = .busy; $0.connectionText = "Инициализация блока двигателя…" }
             self.setEcu(.busy, "Инициализация блока…")
             self.t("=== ЭБУ ===")
             var links = [Link(proto: s.proto, initAddress: s.initAddress, header: s.header)]
@@ -192,26 +224,126 @@ final class Me7Link: ObservableObject {
                 let (session, error) = try self.startSession(e, s)
                 if let session = session {
                     self.ecuOk = true
+                    self.activeModule = .engine
                     self.t("ЭБУ подключён: \(link.label), сессия \(session)")
                     self.setEcu(.ok, "ПОДКЛЮЧЕНО · \(link.label) · сессия \(session)")
+                    self.updateModule(.engine) { $0.connectionState = .ok; $0.connectionText = "Подключено · \(link.label) · сессия \(session)" }
+                    try self.readSoftwareNumber(e, module: .engine)
                     return
                 }
                 results.append("\(link.label) ✗ \(error)")
             }
+            self.updateModule(.engine) { $0.connectionState = .fail; $0.connectionText = results.joined(separator: "\n") }
             self.ecuFail(results.joined(separator: "\n"))
         }
+    }
+
+    /// Connect to one selected KWP2000 controller. Other modules are explicitly reinitialized
+    /// because the ELM adapter can hold only one active physical K-line session at a time.
+    func connectModule(_ module: DtcModule, _ s: Settings) {
+        if module == .engine {
+            connectEcu(s)
+            return
+        }
+        job({ self.moduleConnectionFail(module, $0) }) {
+            guard let e = self.elm else { self.moduleConnectionFail(module, "сначала подключи ELM"); return }
+            self.ecuOk = false
+            if let previous = self.activeModule {
+                self.updateModule(previous) { $0.connectionState = .idle; $0.connectionText = "Сеанс закрыт при выборе другого блока" }
+            }
+            self.activeModule = nil
+            self.setEcu(.idle, "Двигатель не выбран для текущей диагностики")
+            self.updateModule(module) {
+                $0.connectionState = .busy
+                $0.connectionText = "Подключение к блоку \(module.target)…"
+                $0.softwareNumber = "Чтение…"
+                $0.dtcState = .idle
+                $0.dtcText = "Ошибки не прочитаны"
+                $0.codes = []
+            }
+            self.t("=== подключение: \(module.title), адрес 0x\(module.target) ===")
+
+            let target = module.target
+            let links = [
+                Link(proto: "5", initAddress: "", header: "81\(target)F1"),
+                Link(proto: "4", initAddress: target, header: "C1\(target)F1"),
+            ]
+            var failures: [String] = []
+            for link in links {
+                self.t("--- \(link.label), заголовок \(link.header) ---")
+                _ = try e.cmd("ATPC")
+                _ = try e.cmd("ATSP\(link.proto)")
+                if link.proto == "3" || link.proto == "4" { _ = try e.cmd("ATIIA\(link.initAddress)") }
+                _ = try e.cmd("ATSH\(link.header)")
+                _ = try e.cmd("ATWM\(link.header)3E")
+                let (session, error) = try self.startSession(e, module.sessions)
+                if let session = session {
+                    self.activeModule = module
+                    let status = "Подключено · \(link.label) · сессия \(session)"
+                    self.updateModule(module) { $0.connectionState = .ok; $0.connectionText = status }
+                    self.t("\(module.title): подключено, \(status)")
+                    try self.readSoftwareNumber(e, module: module)
+                    return
+                }
+                failures.append("\(link.label): \(error)")
+                _ = try e.cmd("ATPC")
+            }
+
+            var message = failures.joined(separator: "\n")
+            if let hint = module.protocolHint { message += "\n\(hint)" }
+            message += "\nПроверь тип ELM и доступность K-Line этого блока на диагностическом разъёме."
+            self.moduleConnectionFail(module, message)
+        }
+    }
+
+    private func moduleConnectionFail(_ module: DtcModule, _ message: String) {
+        t("ОШИБКА \(module.title): \(message.replacingOccurrences(of: "\n", with: "; "))")
+        if activeModule == module { activeModule = nil }
+        updateModule(module) {
+            $0.connectionState = .fail
+            $0.connectionText = message
+            $0.softwareNumber = "Не получен: нет соединения с блоком"
+        }
+    }
+
+    /// Read long ECU identification first, then try common VAG KWP identification options.
+    /// Values are kept as returned instead of being guessed into a part/software number.
+    private func readSoftwareNumber(_ e: Elm, module: DtcModule) throws {
+        for option in ["9B", "91"] {
+            do {
+                let response = try e.request("1A\(option)", timeout: 4)
+                guard response.isPositive(0x1A), response.bytes.count > 2 else { continue }
+                let value = Dtc.identificationText(Array(response.bytes.dropFirst(2)))
+                let label = "1A \(option) · \(value)"
+                updateModule(module) { $0.softwareNumber = label }
+                t("\(module.title), идентификация ПО: \(label)")
+                return
+            } catch ElmError.closed {
+                throw ElmError.closed
+            } catch {
+                t("\(module.title), идентификация 1A \(option): \(error)")
+            }
+        }
+        updateModule(module) { $0.softwareNumber = "Блок не предоставил поддерживаемый номер ПО" }
+        t("\(module.title): идентификатор ПО не поддержан")
     }
 
     private func ecuFail(_ msg: String) {
         t("ОШИБКА ЭБУ: \(msg.replacingOccurrences(of: "\n", with: "; "))")
         ecuOk = false
+        if activeModule == .engine { activeModule = nil }
+        updateModule(.engine) { $0.connectionState = .fail; $0.connectionText = msg }
         setEcu(.fail, "НЕ ПОДКЛЮЧЕНО\n\(msg)")
     }
 
     /// Returns (accepted session, "") or (nil, short reason of the last failure).
     private func startSession(_ e: Elm, _ s: Settings) throws -> (String?, String) {
-        var reason = "нет ответа"
         let list = s.sessions.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        return try startSession(e, list)
+    }
+
+    private func startSession(_ e: Elm, _ list: [String]) throws -> (String?, String) {
+        var reason = "нет ответа"
         for sess in list {
             let r = try e.request(sess == "-" ? "3E" : sess, timeout: 8)
             t("\(sess == "-" ? "tester present" : "session \(sess)"): \(r)")
@@ -235,6 +367,10 @@ final class Me7Link: ObservableObject {
         job({ self.ecuFail($0) }) {
             guard let e = self.elm else { self.ecuFail("сначала подключи ELM"); return }
             self.ecuOk = false
+            if let previous = self.activeModule {
+                self.updateModule(previous) { $0.connectionState = .idle; $0.connectionText = "Сеанс закрыт для проверки шины" }
+            }
+            self.activeModule = nil
             self.setEcu(.busy, "Проверка шины (OBD 0100)…")
             self.t("=== диагностика шины (OBD 0100) ===")
             var answers: [String] = []
@@ -314,6 +450,71 @@ final class Me7Link: ObservableObject {
     private func dtcFail(_ msg: String) {
         t("ОШИБКА ЧТЕНИЯ DTC: \(msg)")
         setDtc(.fail, "Не удалось: \(msg)")
+    }
+
+    /// Selected-module version used by the new module selector and detail screens.
+    func readDtc(_ module: DtcModule) {
+        job({ self.moduleDtcFail(module, $0) }) {
+            guard let e = self.elm else { self.moduleDtcFail(module, "сначала подключи ELM"); return }
+            guard self.activeModule == module else {
+                self.moduleDtcFail(module, "сначала подключись к этому блоку")
+                return
+            }
+            self.updateModule(module) { $0.dtcState = .busy; $0.dtcText = "Чтение ошибок…" }
+            if module == .engine { self.setDtc(.busy, "Чтение ошибок…") }
+            self.t("=== чтение ошибок: \(module.title) ===")
+            try self.readDtcOnWorker(e, module: module)
+        }
+    }
+
+    /// Clear only the selected controller's fault memory, then confirm by reading it again.
+    func clearDtc(_ module: DtcModule) {
+        job({ self.moduleDtcFail(module, $0) }) {
+            guard let e = self.elm else { self.moduleDtcFail(module, "сначала подключи ELM"); return }
+            guard self.activeModule == module else {
+                self.moduleDtcFail(module, "сначала подключись к этому блоку")
+                return
+            }
+            self.updateModule(module) { $0.dtcState = .busy; $0.dtcText = "Стирание ошибок…" }
+            if module == .engine { self.setDtc(.busy, "Стирание ошибок…") }
+            self.t("=== стирание ошибок: \(module.title) ===")
+            let response = try e.request("14FF00", timeout: 8)
+            self.t("ответ блока на стирание: \(response)")
+            guard response.isPositive(0x14) else {
+                let reason = response.negative && response.bytes.count >= 3
+                    ? "блок отказал: 7F \(hx(response.bytes[1])) \(hx(response.bytes[2]))"
+                    : "нет подтверждения от блока (\(response))"
+                self.moduleDtcFail(module, reason)
+                return
+            }
+            try self.readDtcOnWorker(e, module: module)
+        }
+    }
+
+    private func readDtcOnWorker(_ e: Elm, module: DtcModule) throws {
+        let response = try e.request("1802FF00", timeout: 8)
+        if response.negative {
+            let service = response.bytes.count > 1 ? hx(response.bytes[1]) : "??"
+            let code = response.bytes.count > 2 ? hx(response.bytes[2]) : "??"
+            moduleDtcFail(module, "блок отказал: 7F \(service) \(code)")
+            return
+        }
+        guard let codes = Dtc.entries(from: response.bytes, module: module) else {
+            moduleDtcFail(module, response.bytes.isEmpty
+                ? "нет ответа от блока"
+                : "неизвестный формат ответа: \(response)")
+            return
+        }
+        let message = codes.isEmpty ? "Ошибок нет" : "Найдено ошибок: \(codes.count)"
+        updateModule(module) { $0.dtcState = .ok; $0.dtcText = message; $0.codes = codes }
+        if module == .engine { setDtc(.ok, message) }
+        t("\(module.title): \(message)")
+    }
+
+    private func moduleDtcFail(_ module: DtcModule, _ message: String) {
+        t("ОШИБКА DTC \(module.title): \(message)")
+        updateModule(module) { $0.dtcState = .fail; $0.dtcText = "Не удалось: \(message)" }
+        if module == .engine { setDtc(.fail, "Не удалось: \(message)") }
     }
 
     // ---------- 3. logging ----------

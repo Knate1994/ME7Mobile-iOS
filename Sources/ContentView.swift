@@ -38,29 +38,24 @@ struct ContentView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 14) {
-                appHeader
-                settingsPanel
-                elmPanel
-                ecuPanel
-                dtcPanel
-                recordingPanel
-                livePanel
-                tracePanel
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 14) {
+                    appHeader
+                    settingsPanel
+                    elmPanel
+                    ecuPanel
+                    navigationPanel
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 28)
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 28)
+            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+            .toolbar(.hidden, for: .navigationBar)
         }
         .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
         .sheet(isPresented: $showVars) { VarPicker(selectedCsv: $varsCsv) }
-        .confirmationDialog("Стереть ошибки?", isPresented: $confirmClear, titleVisibility: .visible) {
-            Button("Стереть", role: .destructive) { link.clearDtc() }
-            Button("Отмена", role: .cancel) {}
-        } message: {
-            Text("Все коды и freeze frame в блоке двигателя будут удалены. Лучше сначала прочитать их.")
-        }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true      // keep the screen on in the car
             if varsCsv.isEmpty, let p = EcuDef.presets.first { preset(p.1) }
@@ -140,6 +135,51 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private var navigationPanel: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Text("ДИАГНОСТИКА")
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .tracking(1.2)
+                .foregroundColor(.secondary)
+
+            NavigationLink {
+                ErrorsView(link: link, makeSettings: settings)
+            } label: {
+                navigationCard("Ошибки", detail: "Двигатель · АКПП · ABS/ESP · подвеска", symbol: "exclamationmark.triangle.fill", tint: .orange)
+            }
+            .buttonStyle(.plain)
+
+            NavigationLink {
+                LoggingScreen(link: link, varsCsv: $varsCsv, showVars: $showVars, makeSettings: settings, applyPreset: preset)
+            } label: {
+                navigationCard("Логирование", detail: "Запись параметров двигателя", symbol: "waveform.path.ecg", tint: .cyan)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(15)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private func navigationCard(_ title: String, detail: String, symbol: String, tint: Color) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundColor(tint)
+                .frame(width: 44, height: 44)
+                .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 16, weight: .bold)).foregroundColor(.primary)
+                Text(detail).font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 4)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(Color(uiColor: .tertiaryLabel))
+        }
+        .padding(12)
+        .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
     }
 
     private var dtcPanel: some View {
