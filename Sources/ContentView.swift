@@ -588,6 +588,7 @@ struct VarPicker: View {
         return EcuDef.all.filter {
             $0.name.localizedCaseInsensitiveContains(query) || $0.alias.localizedCaseInsensitiveContains(query)
                 || $0.comment.localizedCaseInsensitiveContains(query)
+                || $0.displayName.localizedCaseInsensitiveContains(query)
         }
     }
 
@@ -624,9 +625,10 @@ struct VarPicker: View {
                         HStack {
                             Image(systemName: sel.contains(m.name) ? "checkmark.circle.fill" : "circle")
                             VStack(alignment: .leading) {
-                                Text(m.name).font(.system(.body, design: .monospaced))
                                 Text(m.displayName)
-                                    .font(.caption).foregroundColor(.secondary).lineLimit(1)
+                                    .font(.body.weight(.medium)).lineLimit(2)
+                                Text(m.name)
+                                    .font(.caption.monospaced()).foregroundColor(.secondary).lineLimit(1)
                             }
                         }
                     }
