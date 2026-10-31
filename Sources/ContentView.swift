@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showVars = false
     @State private var confirmClear = false
+    @State private var showTrace = false
 
     private var selected: [Measurement] {
         let names = Set(varsCsv.split(separator: ",").map(String.init))
@@ -37,85 +38,22 @@ struct ContentView: View {
     }
 
     var body: some View {
-        let elmOk = link.elmState == .ok
-        let elmBusy = link.elmState == .busy
-        let ecuBusy = link.ecuState == .busy
-        let ecuOk = link.ecuState == .ok
-        let dtcBusy = link.dtcState == .busy
-
         ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                DisclosureGroup("Настройки", isExpanded: $showSettings) {
-                    VStack(spacing: 6) {
-                        field("ELM IP", $host, keyboard: .numbersAndPunctuation)
-                        field("Порт", $port, keyboard: .numberPad)
-                        field("Протокол ELM", $proto, keyboard: .numberPad)
-                        field("Адрес блока", $initAddress)
-                        field("Заголовок KWP", $header)
-                        field("Сессии", $sessions, keyboard: .numbersAndPunctuation)
-                        field("Макс. байт", $maxBytes, keyboard: .numberPad)
-                    }
-                    .padding(.top, 6)
-                }
-
-                title("① АДАПТЕР ELM327")
-                StatusBox(state: link.elmState, text: link.elmText)
-                HStack {
-                    button("Подключить ELM", !elmBusy && !link.logging && !ecuBusy) { link.connectElm(settings()) }
-                    button("Отключить", (elmOk || elmBusy) && !link.logging) { link.disconnect() }
-                }
-
-                title("② БЛОК ДВИГАТЕЛЯ (ЭБУ)")
-                StatusBox(state: link.ecuState, text: link.ecuText)
-                HStack {
-                    button("Подключить ЭБУ", elmOk && !ecuBusy && !link.logging) { link.connectEcu(settings()) }
-                    button("Проверить шину", elmOk && !ecuBusy && !link.logging) { link.probeBus() }
-                }
-
-                title("ОШИБКИ ЭБУ")
-                StatusBox(state: link.dtcState, text: link.dtcText)
-                HStack {
-                    button("Прочитать", ecuOk && !link.logging && !dtcBusy) { link.readDtc() }
-                    button("Стереть", ecuOk && !link.logging && !dtcBusy) { confirmClear = true }
-                }
-
-                title("③ ЗАПИСЬ")
-                Text(link.logText.isEmpty ? "Выбрано переменных: \(selected.count)" : link.logText)
-                    .font(.footnote)
-                HStack {
-                    button("Переменные", !link.logging) { showVars = true }
-                    Menu {
-                        ForEach(EcuDef.presets.indices, id: \.self) { i in
-                            Button(EcuDef.presets[i].0) { preset(EcuDef.presets[i].1) }
-                        }
-                    } label: {
-                        Text("Наборы").frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(link.logging)
-                }
-                Button {
-                    if link.logging { link.stopLog() } else { link.startLog(settings(), selected) }
-                } label: {
-                    Text(link.logging ? "■ СТОП ЗАПИСИ" : "▶ СТАРТ ЗАПИСИ")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 6)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(link.logging ? .red : .green)
-                .disabled(!(link.logging || ecuOk) || dtcBusy || (!link.logging && selected.isEmpty))
-
-                liveView
-
-                Text("Обмен с адаптером:").font(.footnote).padding(.top, 8)
-                Text(link.trace.joined(separator: "\n"))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary)
-                    .textSelection(.enabled)
+            VStack(spacing: 14) {
+                appHeader
+                settingsPanel
+                elmPanel
+                ecuPanel
+                dtcPanel
+                recordingPanel
+                livePanel
+                tracePanel
             }
-            .padding(16)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 28)
         }
+        .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
         .sheet(isPresented: $showVars) { VarPicker(selectedCsv: $varsCsv) }
         .confirmationDialog("Стереть ошибки?", isPresented: $confirmClear, titleVisibility: .visible) {
             Button("Стереть", role: .destructive) { link.clearDtc() }
@@ -129,34 +67,238 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder private var liveView: some View {
-        if link.live.isEmpty {
-            Text(selected.map { $0.name }.joined(separator: "\n"))
-                .font(.system(size: 14, design: .monospaced))
-                .foregroundColor(.secondary)
-        } else {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(String(format: "%.1f Гц", link.hz)).font(.system(size: 14, design: .monospaced))
-                ForEach(link.live) { v in
-                    HStack {
-                        Text(v.id)
-                        Spacer()
-                        Text(String(format: "%.2f", v.value)).bold()
-                        Text(v.unit).foregroundColor(.secondary).frame(width: 50, alignment: .leading)
-                    }
-                    .font(.system(size: 17, design: .monospaced))
+    private var appHeader: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "waveform.path.ecg")
+                .font(.system(size: 23, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 48, height: 48)
+                .background(LinearGradient(colors: [Color.cyan, Color.blue], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 15))
+            VStack(alignment: .leading, spacing: 3) {
+                Text("ME7Mobile").font(.system(size: 21, weight: .bold, design: .rounded))
+                Text("Cayenne Turbo · ME7.1.1").font(.caption).foregroundColor(.secondary)
+            }
+            Spacer()
+            Image(systemName: "antenna.radiowaves.left.and.right")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(link.elmState == .ok ? .green : .secondary)
+                .padding(10)
+                .background(Color(uiColor: .tertiarySystemGroupedBackground), in: Circle())
+                .accessibilityLabel(link.elmState == .ok ? "ELM подключён" : "ELM не подключён")
+        }
+        .padding(.vertical, 5)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var settingsPanel: some View {
+        panel {
+            DisclosureGroup(isExpanded: $showSettings) {
+                VStack(spacing: 8) {
+                    field("ELM IP", $host, keyboard: .numbersAndPunctuation)
+                    field("Порт", $port, keyboard: .numberPad)
+                    field("Протокол ELM", $proto, keyboard: .numberPad)
+                    field("Адрес блока", $initAddress)
+                    field("Заголовок KWP", $header)
+                    field("Сессии", $sessions, keyboard: .numbersAndPunctuation)
+                    field("Макс. байт", $maxBytes, keyboard: .numberPad)
+                }
+                .padding(.top, 10)
+            } label: {
+                Label("Настройки соединения", systemImage: "slider.horizontal.3")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.primary)
+            }
+            .tint(.secondary)
+        }
+    }
+
+    private var elmPanel: some View {
+        panel {
+            sectionHeading("01", "Адаптер ELM327", "Wi‑Fi · \(host):\(port)", symbol: "wifi")
+            StatusBox(state: link.elmState, text: link.elmText)
+            HStack(spacing: 9) {
+                actionButton("Подключить", symbol: "link", enabled: link.elmState != .busy && !link.logging && link.ecuState != .busy) {
+                    link.connectElm(settings())
+                }
+                actionButton("Отключить", symbol: "xmark", enabled: (link.elmState == .ok || link.elmState == .busy) && !link.logging) {
+                    link.disconnect()
                 }
             }
         }
     }
 
-    private func title(_ t: String) -> some View {
-        Text(t).font(.system(size: 15, weight: .bold)).padding(.top, 14)
+    private var ecuPanel: some View {
+        panel {
+            sectionHeading("02", "Блок двигателя", "Подключение к ЭБУ", symbol: "cpu")
+            StatusBox(state: link.ecuState, text: link.ecuText)
+            HStack(spacing: 9) {
+                actionButton("Подключить ЭБУ", symbol: "bolt.horizontal.circle", enabled: link.elmState == .ok && link.ecuState != .busy && !link.logging) {
+                    link.connectEcu(settings())
+                }
+                actionButton("Проверить шину", symbol: "waveform.path", enabled: link.elmState == .ok && link.ecuState != .busy && !link.logging) {
+                    link.probeBus()
+                }
+            }
+        }
+    }
+
+    private var dtcPanel: some View {
+        panel {
+            sectionHeading("DTC", "Ошибки ЭБУ", "Коды неисправностей", symbol: "exclamationmark.triangle")
+            StatusBox(state: link.dtcState, text: link.dtcText)
+            HStack(spacing: 9) {
+                actionButton("Прочитать", symbol: "arrow.clockwise", enabled: link.ecuState == .ok && !link.logging && link.dtcState != .busy) {
+                    link.readDtc()
+                }
+                actionButton("Стереть", symbol: "trash", enabled: link.ecuState == .ok && !link.logging && link.dtcState != .busy) {
+                    confirmClear = true
+                }
+            }
+        }
+    }
+
+    private var recordingPanel: some View {
+        panel {
+            sectionHeading("03", "Запись параметров", "Выбрано: \(selected.count) переменных", symbol: "record.circle")
+            if !link.logText.isEmpty {
+                Text(link.logText)
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 9) {
+                actionButton("Переменные", symbol: "list.bullet", enabled: !link.logging) { showVars = true }
+                Menu {
+                    ForEach(EcuDef.presets.indices, id: \.self) { i in
+                        Button(EcuDef.presets[i].0) { preset(EcuDef.presets[i].1) }
+                    }
+                } label: {
+                    Label("Наборы", systemImage: "square.stack.3d.up")
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 44)
+                }
+                .buttonStyle(.bordered)
+                .tint(.cyan)
+                .disabled(link.logging)
+            }
+            Button {
+                if link.logging { link.stopLog() } else { link.startLog(settings(), selected) }
+            } label: {
+                Label(link.logging ? "Остановить запись" : "Начать запись", systemImage: link.logging ? "stop.fill" : "record.circle")
+                    .font(.system(size: 16, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 52)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(link.logging ? .red : .green)
+            .disabled(!(link.logging || link.ecuState == .ok) || link.dtcState == .busy || (!link.logging && selected.isEmpty))
+        }
+    }
+
+    private var livePanel: some View {
+        panel {
+            HStack(alignment: .center) {
+                sectionHeading("", "Показания", "Данные двигателя", symbol: "gauge")
+                Spacer(minLength: 4)
+                if !link.live.isEmpty {
+                    Text(String(format: "%.1f Гц", link.hz))
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .background(Color.cyan.opacity(0.13), in: Capsule())
+                        .foregroundColor(.cyan)
+                }
+            }
+            if link.live.isEmpty {
+                Text(selected.map { $0.name }.joined(separator: "  ·  "))
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(link.live.indices, id: \.self) { index in
+                        let v = link.live[index]
+                        HStack(spacing: 8) {
+                            Text(v.id)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            Text(String(format: "%.2f", v.value))
+                                .fontWeight(.bold)
+                                .foregroundColor(.primary)
+                            Text(v.unit)
+                                .foregroundColor(.secondary)
+                                .frame(minWidth: 42, alignment: .leading)
+                        }
+                        .font(.system(size: 15, design: .monospaced))
+                        .padding(.vertical, 9)
+                        if index < link.live.count - 1 {
+                            Divider().opacity(0.6)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var tracePanel: some View {
+        panel {
+            DisclosureGroup(isExpanded: $showTrace) {
+                ScrollView {
+                    Text(link.trace.suffix(120).joined(separator: "\n"))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 8)
+                }
+                .frame(height: 190)
+            } label: {
+                HStack {
+                    Label("Журнал обмена", systemImage: "terminal")
+                        .font(.system(size: 14, weight: .semibold))
+                    Spacer()
+                    Text("\(link.trace.count) строк")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .foregroundColor(.primary)
+            }
+            .tint(.secondary)
+        }
+    }
+
+    private func panel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 13, content: content)
+            .padding(15)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.primary.opacity(0.055), lineWidth: 1))
+    }
+
+    private func sectionHeading(_ index: String, _ title: String, _ detail: String, symbol: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundColor(.cyan)
+                .frame(width: 38, height: 38)
+                .background(Color.cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    if !index.isEmpty {
+                        Text(index).foregroundColor(.cyan)
+                    }
+                    Text(title).foregroundColor(.primary)
+                }
+                .font(.system(size: 15, weight: .bold))
+                Text(detail).font(.caption).foregroundColor(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
     }
 
     private func field(_ label: String, _ value: Binding<String>, keyboard: UIKeyboardType = .asciiCapable) -> some View {
         HStack {
-            Text(label).frame(width: 130, alignment: .leading)
+            Text(label).frame(width: 120, alignment: .leading).font(.subheadline)
             TextField(label, text: value)
                 .textFieldStyle(.roundedBorder)
                 .keyboardType(keyboard)
@@ -165,34 +307,60 @@ struct ContentView: View {
         }
     }
 
-    private func button(_ title: String, _ enabled: Bool, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) { Text(title).frame(maxWidth: .infinity) }
+    private func actionButton(_ title: String, symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .font(.system(size: 13, weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: 42)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
             .buttonStyle(.bordered)
+            .tint(.cyan)
             .disabled(!enabled)
     }
 }
 
-/// Green = connected, red = failed (reason below the headline), amber = in progress, grey = not connected.
+/// Clear connection states with a compact icon, tinted background, and wrapped diagnostic text.
 struct StatusBox: View {
     let state: LinkState
     let text: String
 
     var body: some View {
-        Text(text)
-            .font(.system(size: 15, weight: .bold))
-            .foregroundColor(state == .busy ? .black : .white)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .background(color)
-            .cornerRadius(8)
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .bold))
+                .frame(width: 22, height: 22)
+                .padding(7)
+                .background(color.opacity(0.15), in: Circle())
+            Text(text)
+                .font(.system(size: 13, weight: .semibold))
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .foregroundColor(color)
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(color.opacity(0.09), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(color.opacity(0.18), lineWidth: 1))
+    }
+
+    private var symbol: String {
+        switch state {
+        case .ok: return "checkmark"
+        case .fail: return "exclamationmark"
+        case .busy: return "ellipsis"
+        case .idle: return "circle"
+        }
     }
 
     private var color: Color {
         switch state {
-        case .ok: return Color(red: 0.18, green: 0.49, blue: 0.20)
-        case .fail: return Color(red: 0.78, green: 0.16, blue: 0.16)
-        case .busy: return Color(red: 0.98, green: 0.66, blue: 0.15)
-        case .idle: return Color(white: 0.26)
+        case .ok: return Color(red: 0.12, green: 0.62, blue: 0.34)
+        case .fail: return Color(red: 0.82, green: 0.20, blue: 0.20)
+        case .busy: return Color(red: 0.88, green: 0.55, blue: 0.08)
+        case .idle: return Color.secondary
         }
     }
 }
