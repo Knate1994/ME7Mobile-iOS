@@ -1,6 +1,12 @@
 import SwiftUI
 import UIKit
 
+private struct VariablePreset: Codable, Identifiable {
+    var id: String = UUID().uuidString
+    var name: String
+    var variables: [String]
+}
+
 struct LoggingScreen: View {
     @ObservedObject var link: Me7Link
     @Binding var varsCsv: String
@@ -8,10 +14,56 @@ struct LoggingScreen: View {
     let makeSettings: () -> Settings
     let applyPreset: ([String]) -> Void
     @State private var showTrace = false
+    @AppStorage("me7.customVariablePresets") private var customPresetsJSON = "[]"
+    @State private var showSavePreset = false
+    @State private var presetName = ""
+    @State private var showDeletePresetConfirmation = false
+    @State private var presetPendingDeletion: VariablePreset?
 
     private var selected: [Measurement] {
         let names = Set(varsCsv.split(separator: ",").map(String.init))
         return EcuDef.all.filter { names.contains($0.name) }
+    }
+
+    private var customPresets: [VariablePreset] {
+        guard let data = customPresetsJSON.data(using: .utf8),
+              let presets = try? JSONDecoder().decode([VariablePreset].self, from: data) else { return [] }
+        return presets
+    }
+
+    private var canSavePreset: Bool {
+        let name = presetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !name.isEmpty && !selected.isEmpty && !customPresets.contains {
+            $0.name.caseInsensitiveCompare(name) == .orderedSame
+        }
+    }
+
+    private var savePresetHint: String {
+        let name = presetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if selected.isEmpty { return "Сначала выбери хотя бы одну переменную." }
+        if customPresets.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            return "Такое имя уже занято. Укажи другое."
+        }
+        return "Сохранится текущий выбор: \(selected.count) переменных."
+    }
+
+    private func savePreset() {
+        let name = presetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canSavePreset else { return }
+        var presets = customPresets
+        presets.append(VariablePreset(name: name, variables: selected.map(\.name)))
+        persistPresets(presets)
+    }
+
+    private func deletePreset(_ id: String) {
+        persistPresets(customPresets.filter { $0.id != id })
+        presetPendingDeletion = nil
+    }
+
+    private func persistPresets(_ presets: [VariablePreset]) {
+        guard let data = try? JSONEncoder().encode(presets),
+              let json = String(data: data, encoding: .utf8) else { return }
+        customPresetsJSON = json
     }
 
     var body: some View {
@@ -29,9 +81,36 @@ struct LoggingScreen: View {
                     HStack(spacing: 9) {
                         actionButton("Переменные", symbol: "list.bullet", enabled: !link.logging) { showVars = true }
                         Menu {
-                            ForEach(EcuDef.presets.indices, id: \.self) { index in
-                                Button(EcuDef.presets[index].0) { applyPreset(EcuDef.presets[index].1) }
+                            Section("Стандартные") {
+                                ForEach(EcuDef.presets.indices, id: \.self) { index in
+                                    Button(EcuDef.presets[index].0) { applyPreset(EcuDef.presets[index].1) }
+                                }
                             }
+                            if !customPresets.isEmpty {
+                                Section("Мои наборы") {
+                                    ForEach(customPresets) { preset in
+                                        Button(preset.name) { applyPreset(preset.variables) }
+                                    }
+                                }
+                                Menu {
+                                    ForEach(customPresets) { preset in
+                                        Button(preset.name, role: .destructive) {
+                                            presetPendingDeletion = preset
+                                            showDeletePresetConfirmation = true
+                                        }
+                                    }
+                                } label: {
+                                    Label("Удалить свой набор…", systemImage: "trash")
+                                }
+                            }
+                            Divider()
+                            Button {
+                                presetName = ""
+                                showSavePreset = true
+                            } label: {
+                                Label("Сохранить текущий выбор…", systemImage: "bookmark")
+                            }
+                            .disabled(selected.isEmpty)
                         } label: {
                             Label("Наборы", systemImage: "square.stack.3d.up")
                                 .frame(maxWidth: .infinity)
@@ -120,6 +199,21 @@ struct LoggingScreen: View {
         .navigationTitle("Логирование")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
+        .alert("Сохранить набор", isPresented: $showSavePreset) {
+            TextField("Название набора", text: $presetName)
+            Button("Сохранить", action: savePreset).disabled(!canSavePreset)
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text(savePresetHint)
+        }
+        .confirmationDialog("Удалить набор?", isPresented: $showDeletePresetConfirmation) {
+            Button("Удалить", role: .destructive) {
+                if let preset = presetPendingDeletion { deletePreset(preset.id) }
+            }
+            Button("Отмена", role: .cancel) { presetPendingDeletion = nil }
+        } message: {
+            Text("Набор «\(presetPendingDeletion?.name ?? "")» будет удалён.")
+        }
     }
 
     private func panel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
