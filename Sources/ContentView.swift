@@ -55,7 +55,10 @@ struct ContentView: View {
         .sheet(isPresented: $showVars) { VarPicker(selectedCsv: $varsCsv) }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true      // keep the screen on in the car
-            if varsCsv.isEmpty, let p = EcuDef.presets.first { preset(p.1) }
+            let previousBoostPreset = ["nmot", "wped_w", "wdkba", "rl_w", "rlsol_w", "rlmax_w", "plsol", "pvdkds_w", "pu_w",
+                                       "ldtvm", "ldrlts_w", "B_ldsua", "zwout", "tans", "lamsoni_w", "lamsoni2_w"].joined(separator: ",")
+            if varsCsv == previousBoostPreset, let boost = EcuDef.presets.first { preset(boost.1) }
+            else if varsCsv.isEmpty, let first = EcuDef.presets.first { preset(first.1) }
         }
         .onChange(of: currentPage) { page in
             pageNavigationRequestID += 1
@@ -423,7 +426,7 @@ struct ContentView: View {
                     ForEach(link.live.indices, id: \.self) { index in
                         let v = link.live[index]
                         HStack(spacing: 8) {
-                            Text(v.id)
+                            Text(v.label)
                                 .foregroundColor(.secondary)
                                 .lineLimit(1)
                             Spacer(minLength: 4)
@@ -440,6 +443,11 @@ struct ContentView: View {
                             Divider().opacity(0.6)
                         }
                     }
+                }
+                if link.live.contains(where: { $0.id == "boost_actual_gauge" }) {
+                    Text("Избыточный наддув рассчитан относительно атмосферного давления.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
             }
         }
@@ -617,7 +625,7 @@ struct VarPicker: View {
                             Image(systemName: sel.contains(m.name) ? "checkmark.circle.fill" : "circle")
                             VStack(alignment: .leading) {
                                 Text(m.name).font(.system(.body, design: .monospaced))
-                                Text(m.alias.isEmpty ? m.comment : m.alias)
+                                Text(m.displayName)
                                     .font(.caption).foregroundColor(.secondary).lineLimit(1)
                             }
                         }

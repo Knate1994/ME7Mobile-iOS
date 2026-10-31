@@ -15,6 +15,7 @@ enum LinkState: Equatable { case idle, busy, ok, fail }
 
 struct LiveValue: Identifiable {
     let id: String
+    let label: String
     let value: Double
     let unit: String
 }
@@ -633,53 +634,186 @@ final class Me7Link: ObservableObject {
                 return
             }
             self.setLog(true, "Определение переменных (0x2C)…")
-            let (vars, mode) = try self.defineVariables(e, s, wanted)
-            if vars.isEmpty {
+            let plan = try self.defineVariables(e, s, wanted)
+            if plan.variables.count != wanted.count {
+                let accepted = Set(plan.variables.map(\.name))
+                let missing = wanted.filter { !accepted.contains($0.name) }.map(\.name)
                 self.running = false
-                self.t("ОШИБКА ЗАПИСИ: ни одна переменная не принята блоком")
-                self.setLog(false, "ни одна переменная не принята блоком (см. лог)")
+                self.t("ОШИБКА ЗАПИСИ: ЭБУ разрешил \(plan.variables.count) из \(wanted.count); не прочитаны: \(missing.joined(separator: ", "))")
+                self.setLog(false, "ЭБУ принял \(plan.variables.count) из \(wanted.count) переменных; см. журнал")
                 return
             }
-            try self.logLoop(e, s, vars, mode)
+            try self.logLoop(e, plan)
         }
     }
 
     private enum Mode: String { case ddli = "DDLI", rmba = "RMBA" }
 
-    private func defineVariables(_ e: Elm, _ s: Settings, _ wanted: [Measurement]) throws -> ([Measurement], Mode) {
-        let lid = s.lid
-        _ = try e.request("2C\(lid)04")                   // clear LID (may be refused, harmless)
-        var ok: [Measurement] = []
-        var pos = 1
-        var refusedService = false
-        for m in wanted {
-            if pos - 1 + m.size > s.maxBytes { t("лимит \(s.maxBytes) байт: \(m.name) пропущена"); continue }
-            let r = try e.request("2C\(lid)03\(hx(pos))\(hx(m.size))\(hx(m.address, 6))")
-            if r.isPositive(0x2C) {
-                ok.append(m); pos += m.size
-            } else {
-                t("2C отказ для \(m.name): \(r)")
-                if r.negative && [0x11, 0x33, 0x80].contains(r.bytes[2]) { refusedService = true; break }
-            }
-        }
-        if !ok.isEmpty && !refusedService { return (ok, .ddli) }
-        // fallback: readMemoryByAddress per variable
-        setLog(true, "0x2C не принят, пробую 0x23 (медленнее)…")
-        var ok2: [Measurement] = []
-        for m in wanted {
-            let r = try e.request("23\(hx(m.address, 6))\(hx(m.size))")
-            if r.isPositive(0x23) { ok2.append(m) } else { t("23 отказ для \(m.name): \(r)") }
-        }
-        return (ok2, .rmba)
+    private struct MemorySpan {
+        var address: Int
+        var size: Int
     }
 
-    private func logLoop(_ e: Elm, _ s: Settings, _ vars: [Measurement], _ mode: Mode) throws {
+    private struct MemoryRegion {
+        let address: Int
+        let size: Int
+        let position: Int
+    }
+
+    private struct ReadGroup {
+        let lid: String
+        let regions: [MemoryRegion]
+        let byteCount: Int
+    }
+
+    private struct ReadPlan {
+        let variables: [Measurement]
+        let groups: [ReadGroup]
+        let offsets: [String: Int]
+        let mode: Mode
+    }
+
+    private func defineVariables(_ e: Elm, _ s: Settings, _ wanted: [Measurement]) throws -> ReadPlan {
+        let byteLimit = min(max(s.maxBytes, 1), 0xFF)
+        let sorted = wanted.sorted {
+            if $0.address == $1.address { return $0.size < $1.size }
+            return $0.address < $1.address
+        }
+        var spans: [MemorySpan] = []
+        for measurement in sorted {
+            guard measurement.size > 0, measurement.size <= byteLimit else {
+                t("размер \(measurement.name) не помещается в один ответ 0x21")
+                return try defineByMemory(e, wanted)
+            }
+            let end = measurement.address + measurement.size
+            if let last = spans.indices.last {
+                let currentEnd = spans[last].address + spans[last].size
+                let mergedEnd = max(currentEnd, end)
+                if measurement.address <= currentEnd && mergedEnd - spans[last].address <= byteLimit {
+                    spans[last].size = mergedEnd - spans[last].address
+                    continue
+                }
+            }
+            spans.append(MemorySpan(address: measurement.address, size: measurement.size))
+        }
+
+        // These ME7 ECUs accept at most three memory regions in each dynamic local ID.
+        // Adjacent variables are merged into one region before using another ID.
+        let regionsPerLid = 3
+        let maximumLids = 10
+        var spanGroups: [[MemorySpan]] = []
+        var currentGroup: [MemorySpan] = []
+        var currentBytes = 0
+        for span in spans {
+            if currentGroup.count == regionsPerLid || currentBytes + span.size > byteLimit {
+                spanGroups.append(currentGroup)
+                currentGroup = []
+                currentBytes = 0
+            }
+            currentGroup.append(span)
+            currentBytes += span.size
+        }
+        if !currentGroup.isEmpty { spanGroups.append(currentGroup) }
+
+        guard spanGroups.count <= maximumLids,
+              let firstLid = Int(s.lid, radix: 16), firstLid + spanGroups.count - 1 <= 0xFF else {
+            t("0x2C набрал слишком много разрозненных областей; перехожу на 0x23")
+            return try defineByMemory(e, wanted)
+        }
+
+        var groups: [ReadGroup] = []
+        var definitionFailed = false
+        for (groupIndex, spanGroup) in spanGroups.enumerated() {
+            let lid = String(format: "%02X", firstLid + groupIndex)
+            let clear = try e.request("2C\(lid)04")
+            guard clear.isPositive(0x2C) else {
+                t("2C очистка LID \(lid): \(clear)")
+                definitionFailed = true
+                break
+            }
+
+            var regions: [MemoryRegion] = []
+            var position = 1
+            for span in spanGroup {
+                guard position - 1 + span.size <= byteLimit else {
+                    t("лимит \(byteLimit) байт для LID \(lid)")
+                    definitionFailed = true
+                    break
+                }
+                let response = try e.request("2C\(lid)03\(hx(position))\(hx(span.size))\(hx(span.address, 6))")
+                guard response.isPositive(0x2C) else {
+                    t("2C отказ для области 0x\(hx(span.address, 6)) размером \(span.size), LID \(lid): \(response)")
+                    definitionFailed = true
+                    break
+                }
+                regions.append(MemoryRegion(address: span.address, size: span.size, position: position))
+                position += span.size
+            }
+            if definitionFailed { break }
+            groups.append(ReadGroup(lid: lid, regions: regions, byteCount: position - 1))
+        }
+
+        if !definitionFailed {
+            var offsets: [String: Int] = [:]
+            var groupOffset = 0
+            for group in groups {
+                for measurement in wanted {
+                    guard let region = group.regions.first(where: {
+                        measurement.address >= $0.address && measurement.address + measurement.size <= $0.address + $0.size
+                    }) else { continue }
+                    offsets[measurement.name] = groupOffset + region.position - 1 + measurement.address - region.address
+                }
+                groupOffset += group.byteCount
+            }
+            if offsets.count == wanted.count {
+                return ReadPlan(variables: wanted, groups: groups, offsets: offsets, mode: .ddli)
+            }
+            t("0x2C не сопоставил все выбранные переменные; пробую 0x23")
+        }
+
+        return try defineByMemory(e, wanted)
+    }
+
+    private func defineByMemory(_ e: Elm, _ wanted: [Measurement]) throws -> ReadPlan {
+        setLog(true, "0x2C не принят полностью, пробую 0x23 (медленнее)…")
+        var variables: [Measurement] = []
+        var offsets: [String: Int] = [:]
+        var position = 0
+        for measurement in wanted {
+            let response = try e.request("23\(hx(measurement.address, 6))\(hx(measurement.size))")
+            if response.isPositive(0x23) && response.bytes.count >= 1 + measurement.size {
+                offsets[measurement.name] = position
+                position += measurement.size
+                variables.append(measurement)
+            } else {
+                t("23 отказ для \(measurement.name): \(response)")
+            }
+        }
+        return ReadPlan(variables: variables, groups: [], offsets: offsets, mode: .rmba)
+    }
+
+    private func logLoop(_ e: Elm, _ plan: ReadPlan) throws {
+        let vars = plan.variables
         let st = stamp()
         let csv = openOutput("me7_\(st).csv")
         func w(_ line: String) { if let d = line.data(using: .utf8) { csv?.write(d) } }
-        w("TimeStamp," + vars.map { $0.name }.joined(separator: ",") + "\n")
-        w("s," + vars.map { $0.unit }.joined(separator: ",") + "\n")
-        setLog(true, "Запись: \(vars.count) перем., режим \(mode.rawValue) → ME7Logs/me7_\(st).csv")
+        let actualPressure = vars.firstIndex { ["pvdkds_w", "pvdks_w"].contains($0.name) }
+        let requestedPressure = vars.firstIndex { ["plsol", "plsol_w"].contains($0.name) }
+        let ambientPressure = vars.firstIndex { ["pu_w", "pus_w"].contains($0.name) }
+        let hasActualBoost = actualPressure != nil && ambientPressure != nil
+        let hasRequestedBoost = requestedPressure != nil && ambientPressure != nil
+        var extraNames: [String] = []
+        var extraUnits: [String] = []
+        if hasActualBoost { extraNames.append("boost_actual_gauge"); extraUnits.append("mbar(g)") }
+        if hasRequestedBoost { extraNames.append("boost_target_gauge"); extraUnits.append("mbar(g)") }
+        w("TimeStamp," + (vars.map { $0.name } + extraNames).joined(separator: ",") + "\n")
+        w("s," + (vars.map { $0.unit } + extraUnits).joined(separator: ",") + "\n")
+        let modeText: String
+        switch plan.mode {
+        case .ddli: modeText = "DDLI · \(plan.groups.count) блока"
+        case .rmba: modeText = "RMBA"
+        }
+        setLog(true, "Запись: \(vars.count) перем., режим \(modeText) → ME7Logs/me7_\(st).csv")
         var values = [Double](repeating: 0, count: vars.count)
         let t0 = Date()
         var samples = 0
@@ -688,7 +822,6 @@ final class Me7Link: ObservableObject {
         var hzT = Date()
         var hzN = 0
         var hz = 0.0
-        let total = vars.reduce(0) { $0 + $1.size }
         var reason = "остановлено, записано"
         defer {
             running = false
@@ -698,14 +831,21 @@ final class Me7Link: ObservableObject {
         }
         while running {
             var data: [UInt8]? = nil
-            switch mode {
+            switch plan.mode {
             case .ddli:
-                let r = try e.request("21\(s.lid)", timeout: 1.5)
-                if r.isPositive(0x21) && r.bytes.count >= 2 + total {
-                    data = r.bytes[2..<(2 + total)].map { UInt8($0) }
-                } else {
-                    t("21: \(r)")
+                var buffer: [UInt8] = []
+                var good = true
+                for group in plan.groups {
+                    let response = try e.request("21\(group.lid)", timeout: 1.5)
+                    if response.isPositive(0x21) && response.bytes.count >= 2 + group.byteCount {
+                        buffer += response.bytes[2..<(2 + group.byteCount)].map { UInt8($0) }
+                    } else {
+                        t("21 LID \(group.lid): \(response)")
+                        good = false
+                        break
+                    }
                 }
+                if good { data = buffer }
             case .rmba:
                 var buf: [UInt8] = []
                 var good = true
@@ -729,16 +869,48 @@ final class Me7Link: ObservableObject {
                 continue
             }
             fails = 0
-            var p = 0
-            for i in vars.indices { values[i] = vars[i].convert(d, p); p += vars[i].size }
-            w(String(format: "%.3f", Date().timeIntervalSince(t0)) + values.map { "," + fmt($0) }.joined() + "\n")
+            var validOffsets = true
+            for i in vars.indices {
+                guard let offset = plan.offsets[vars[i].name], offset + vars[i].size <= d.count else {
+                    t("нет байтов для \(vars[i].name) в ответе")
+                    validOffsets = false
+                    break
+                }
+                values[i] = vars[i].convert(d, offset)
+            }
+            if !validOffsets {
+                fails += 1
+                if fails >= 5 {
+                    reason = "неполный ответ ЭБУ, записано"
+                    ecuFail("ответ не содержит данные всех выбранных переменных")
+                    break
+                }
+                continue
+            }
+
+            var outputValues = values
+            var derivedLive: [LiveValue] = []
+            if let actualPressure, let ambientPressure {
+                let value = values[actualPressure] - values[ambientPressure]
+                outputValues.append(value)
+                derivedLive.append(LiveValue(id: "boost_actual_gauge", label: "Наддув фактический · избыточный", value: value, unit: "mbar"))
+            }
+            if let requestedPressure, let ambientPressure {
+                let value = values[requestedPressure] - values[ambientPressure]
+                outputValues.append(value)
+                derivedLive.append(LiveValue(id: "boost_target_gauge", label: "Наддув заданный · избыточный", value: value, unit: "mbar"))
+            }
+            w(String(format: "%.3f", Date().timeIntervalSince(t0)) + outputValues.map { "," + fmt($0) }.joined() + "\n")
             samples += 1
             hzN += 1
             let now = Date()
             if now.timeIntervalSince(hzT) > 1 { hz = Double(hzN) / now.timeIntervalSince(hzT); hzT = now; hzN = 0 }
             if now.timeIntervalSince(lastUi) > 0.15 {
                 lastUi = now
-                let snap = zip(vars, values).map { pair in LiveValue(id: pair.0.name, value: pair.1, unit: pair.0.unit) }
+                var snap = vars.indices.map { index in
+                    LiveValue(id: vars[index].name, label: vars[index].displayName, value: values[index], unit: vars[index].unit)
+                }
+                snap += derivedLive
                 let h = hz
                 ui { self.live = snap; self.hz = h }
             }

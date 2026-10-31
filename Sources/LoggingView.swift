@@ -155,7 +155,7 @@ struct LoggingScreen: View {
                             ForEach(link.live.indices, id: \.self) { index in
                                 let value = link.live[index]
                                 HStack(spacing: 8) {
-                                    Text(value.id).foregroundStyle(.secondary).lineLimit(1)
+                                    Text(value.label).foregroundStyle(.secondary).lineLimit(1)
                                     Spacer(minLength: 4)
                                     Text(String(format: "%.2f", value.value)).fontWeight(.bold)
                                     Text(value.unit).foregroundStyle(.secondary).frame(minWidth: 42, alignment: .leading)
@@ -165,6 +165,11 @@ struct LoggingScreen: View {
                                 if index < link.live.count - 1 { Divider().opacity(0.6) }
                             }
                         }
+                    }
+                    if link.live.contains(where: { $0.id == "boost_actual_gauge" }) {
+                        Text("Избыточный наддув рассчитан относительно атмосферного давления.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
 

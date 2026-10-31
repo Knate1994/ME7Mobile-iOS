@@ -31,6 +31,38 @@ struct Measurement: Identifiable, Hashable {
         }
         return factor * Double(raw) - offset
     }
+
+    var displayName: String {
+        if name.hasPrefix("dwkrz_"), let channel = Int(name.dropFirst("dwkrz_".count)) {
+            return "Откат УОЗ по детонации · канал \(channel + 1)"
+        }
+        switch name {
+        case "nmot": return "Обороты двигателя"
+        case "gangi": return "Передача"
+        case "wped_w": return "Положение педали газа"
+        case "wdkba": return "Угол дросселя"
+        case "rl_w", "rl": return "Наполнение двигателя · фактическое"
+        case "rlsol_w": return "Наполнение двигателя · заданное"
+        case "rlmax_w": return "Предельное наполнение двигателя"
+        case "plsol", "plsol_w": return "Наддув заданный · абсолютное давление"
+        case "pvdkds_w", "pvdks_w": return "Наддув фактический · абсолютное давление"
+        case "pu_w", "pus_w": return "Атмосферное давление"
+        case "ldtvm": return "N75 · итоговая скважность"
+        case "ldtvr_w": return "N75 · команда регулятора"
+        case "ldrlts_w": return "Ограничение наддува · защита турбины"
+        case "mshfm_w": return "Расход воздуха"
+        case "wkrm": return "Средний откат УОЗ по детонации"
+        case "zwout": return "Угол зажигания общий"
+        case "lamsoni_w": return "Лямбда фактическая · банк 1"
+        case "lamsoni2_w": return "Лямбда фактическая · банк 2"
+        case "tans": return "Температура воздуха на впуске"
+        case "tmot": return "Температура охлаждающей жидкости"
+        case "B_ldsua": return "Клапан рециркуляции открыт"
+        case "B_ldsuad": return "Управление рециркуляцией · динамическое"
+        case "B_ldsuas": return "Управление рециркуляцией · установившееся"
+        default: return alias.isEmpty ? name : alias
+        }
+    }
 }
 
 enum EcuDef {
@@ -57,8 +89,10 @@ enum EcuDef {
 
     /// Ready-made variable sets (names that exist in kai.ecu).
     static let presets: [(String, [String])] = [
-        ("Наддув", ["nmot", "wped_w", "wdkba", "rl_w", "rlsol_w", "rlmax_w", "plsol", "pvdkds_w", "pu_w",
-                    "ldtvm", "ldrlts_w", "B_ldsua", "zwout", "tans", "lamsoni_w", "lamsoni2_w"]),
+        ("Наддув", ["nmot", "gangi", "wped_w", "wdkba", "rl_w", "rlsol_w", "rlmax_w", "plsol_w",
+                    "pvdkds_w", "pus_w", "ldtvm", "ldtvr_w", "ldrlts_w", "mshfm_w", "B_ldsua", "B_ldsuad",
+                    "B_ldsuas", "zwout", "dwkrz_0", "dwkrz_1", "dwkrz_2", "dwkrz_3", "dwkrz_4", "dwkrz_5",
+                    "dwkrz_6", "dwkrz_7", "tans", "tmot", "lamsoni_w", "lamsoni2_w"]),
         ("Детонация", ["nmot", "rl_w", "zwout", "dwkrz_0", "dwkrz_1", "dwkrz_2", "dwkrz_3",
                        "dwkrz_4", "dwkrz_5", "dwkrz_6", "dwkrz_7", "wkrm", "tans"]),
         ("Лямбда", ["nmot", "rl_w", "lamsbg_w", "lamfa_w", "lambts_w", "lamsoni_w", "lamsoni2_w",
