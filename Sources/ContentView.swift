@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var confirmClear = false
     @State private var showTrace = false
     @State private var currentPage = 2
+    @State private var pageNavigationRequestID = 0
 
     private var selected: [Measurement] {
         let names = Set(varsCsv.split(separator: ",").map(String.init))
@@ -57,6 +58,7 @@ struct ContentView: View {
             if varsCsv.isEmpty, let p = EcuDef.presets.first { preset(p.1) }
         }
         .onChange(of: currentPage) { page in
+            pageNavigationRequestID += 1
             guard page == 0 || page == 4 else { return }
             DispatchQueue.main.async {
                 var transaction = Transaction()
@@ -188,14 +190,26 @@ struct ContentView: View {
     private var pageNavigation: some View {
         let selectedPage = currentPage == 2 ? 1 : ((currentPage == 0 || currentPage == 3) ? 2 : 0)
         return HStack(spacing: 8) {
-            pageButton("Ошибки", symbol: "exclamationmark.triangle", selected: selectedPage == 0) { currentPage = 1 }
-            pageButton("Подключение", symbol: "antenna.radiowaves.left.and.right", selected: selectedPage == 1) { currentPage = 2 }
-            pageButton("Логирование", symbol: "waveform.path.ecg", selected: selectedPage == 2) { currentPage = 3 }
+            pageButton("Ошибки", symbol: "exclamationmark.triangle", selected: selectedPage == 0) { navigate(to: 1) }
+            pageButton("Подключение", symbol: "antenna.radiowaves.left.and.right", selected: selectedPage == 1) { navigate(to: 2) }
+            pageButton("Логирование", symbol: "waveform.path.ecg", selected: selectedPage == 2) { navigate(to: 3) }
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 4)
         .background(.ultraThinMaterial)
+        .animation(.easeInOut(duration: 0.22), value: selectedPage)
+    }
+
+    private func navigate(to page: Int) {
+        pageNavigationRequestID += 1
+        let requestID = pageNavigationRequestID
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+            guard requestID == pageNavigationRequestID else { return }
+            withAnimation(.easeInOut(duration: 0.32)) {
+                currentPage = page
+            }
+        }
     }
 
     private func pageButton(_ title: String, symbol: String, selected: Bool, action: @escaping () -> Void) -> some View {

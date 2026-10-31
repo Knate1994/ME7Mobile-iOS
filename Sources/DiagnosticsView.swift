@@ -4,6 +4,7 @@ import UIKit
 struct ErrorsView: View {
     @ObservedObject var link: Me7Link
     let makeSettings: () -> Settings
+    @State private var confirmClearAll = false
 
     private let columns = [GridItem(.flexible(), spacing: 11), GridItem(.flexible(), spacing: 11)]
 
@@ -15,6 +16,42 @@ struct ErrorsView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
+                Button {
+                    confirmClearAll = true
+                } label: {
+                    HStack(spacing: 11) {
+                        if link.clearAllState == .busy {
+                            ProgressView().tint(.white)
+                        } else {
+                            Image(systemName: "trash.fill").font(.system(size: 17, weight: .bold))
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(link.clearAllState == .busy ? "Удаляем ошибки…" : "Удалить ошибки во всех блоках")
+                                .font(.system(size: 15, weight: .bold))
+                                .multilineTextAlignment(.leading)
+                            if link.clearAllState != .busy {
+                                Text("Двигатель · АКПП · ABS/ESP · подвеска")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.82))
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
+                    .padding(.horizontal, 15)
+                    .foregroundStyle(.white)
+                    .background(Color.red, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(link.elmState != .ok || link.clearAllState == .busy)
+
+                if link.clearAllState != .idle {
+                    Label(link.clearAllText, systemImage: link.clearAllState == .ok ? "checkmark.circle.fill" : (link.clearAllState == .busy ? "arrow.triangle.2.circlepath" : "exclamationmark.triangle.fill"))
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(link.clearAllState == .ok ? Color.green : (link.clearAllState == .busy ? Color.orange : Color.red))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 LazyVGrid(columns: columns, spacing: 11) {
                     ForEach(DtcModule.allCases) { module in
                         NavigationLink {
@@ -23,6 +60,7 @@ struct ErrorsView: View {
                             ModuleTile(module: module, diagnostic: link.moduleDiagnostics[module] ?? ModuleDiagnostic())
                         }
                         .buttonStyle(.plain)
+                        .disabled(link.clearAllState == .busy)
                     }
                 }
 
@@ -37,6 +75,12 @@ struct ErrorsView: View {
         .navigationTitle("Ошибки")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
+        .confirmationDialog("Удалить ошибки из всех блоков?", isPresented: $confirmClearAll, titleVisibility: .visible) {
+            Button("Удалить во всех блоках", role: .destructive) { link.clearAllDtc(makeSettings()) }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Приложение по очереди подключится к двигателю, АКПП, ABS/ESP и подвеске. Из каждого блока будут удалены сохранённые ошибки, если блок ответит и подтвердит команду.")
+        }
     }
 }
 
