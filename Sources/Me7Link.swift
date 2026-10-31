@@ -118,6 +118,13 @@ final class Me7Link: ObservableObject {
 
     // ---------- 1. adapter ----------
 
+    /// One button starts the adapter connection and queues the ECU connection right after it.
+    /// Both jobs share the serial worker, so the ECU is attempted only after ELM setup completes.
+    func connectAll(_ s: Settings) {
+        connectElm(s)
+        connectEcu(s)
+    }
+
     func connectElm(_ s: Settings) {
         ui { self.trace.removeAll() }
         job({ self.elmFail($0) }) {

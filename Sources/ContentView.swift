@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var showVars = false
     @State private var confirmClear = false
     @State private var showTrace = false
+    @State private var currentPage = 2
 
     private var selected: [Measurement] {
         let names = Set(varsCsv.split(separator: ",").map(String.init))
@@ -38,28 +39,177 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 14) {
-                    appHeader
-                    settingsPanel
-                    elmPanel
-                    ecuPanel
-                    navigationPanel
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 28)
+        ZStack {
+            Color(uiColor: .systemGroupedBackground).ignoresSafeArea()
+            TabView(selection: $currentPage) {
+                loggingPage.tag(0)
+                errorsPage.tag(1)
+                connectionPage.tag(2)
+                loggingPage.tag(3)
+                errorsPage.tag(4)
             }
-            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
-            .toolbar(.hidden, for: .navigationBar)
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .safeAreaInset(edge: .bottom, spacing: 0) { pageNavigation }
         }
-        .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
         .sheet(isPresented: $showVars) { VarPicker(selectedCsv: $varsCsv) }
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true      // keep the screen on in the car
             if varsCsv.isEmpty, let p = EcuDef.presets.first { preset(p.1) }
         }
+        .onChange(of: currentPage) { page in
+            guard page == 0 || page == 4 else { return }
+            DispatchQueue.main.async {
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) { currentPage = page == 0 ? 3 : 1 }
+            }
+        }
+    }
+
+    private var connectionPage: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 18) {
+                    appHeader
+                    connectionButton
+                    HStack(spacing: 10) {
+                        connectionStatus("ELM327", state: link.elmState, text: link.elmText, symbol: "wifi")
+                        connectionStatus("ЭБУ двигателя", state: link.ecuState, text: link.ecuText, symbol: "cpu")
+                    }
+                    swipeHint
+                    settingsPanel
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                .padding(.bottom, 20)
+            }
+            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+            .toolbar(.hidden, for: .navigationBar)
+        }
+    }
+
+    private var loggingPage: some View {
+        NavigationStack {
+            LoggingScreen(link: link, varsCsv: $varsCsv, showVars: $showVars, makeSettings: settings, applyPreset: preset)
+        }
+    }
+
+    private var errorsPage: some View {
+        NavigationStack {
+            ErrorsView(link: link, makeSettings: settings)
+        }
+    }
+
+    private var connectionButton: some View {
+        Button {
+            link.connectAll(settings())
+        } label: {
+            VStack(spacing: 10) {
+                if link.elmState == .busy || link.ecuState == .busy {
+                    ProgressView().tint(.white).scaleEffect(1.15)
+                } else {
+                    Image(systemName: link.elmState == .ok && link.ecuState == .ok ? "checkmark.circle.fill" : "antenna.radiowaves.left.and.right")
+                        .font(.system(size: 38, weight: .medium))
+                }
+                Text(link.elmState == .ok && link.ecuState == .ok ? "Переподключить" : "Подключить автомобиль")
+                    .font(.system(size: 21, weight: .bold, design: .rounded))
+                Text("ELM327  +  блок двигателя")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.white.opacity(0.82))
+            }
+            .foregroundColor(.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 158)
+            .background(
+                LinearGradient(colors: [Color(red: 0.05, green: 0.57, blue: 0.76), Color(red: 0.10, green: 0.31, blue: 0.72)], startPoint: .topLeading, endPoint: .bottomTrailing),
+                in: RoundedRectangle(cornerRadius: 25, style: .continuous)
+            )
+            .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).stroke(Color.white.opacity(0.18), lineWidth: 1))
+            .shadow(color: Color.blue.opacity(0.20), radius: 16, y: 8)
+        }
+        .buttonStyle(.plain)
+        .disabled(link.elmState == .busy || link.ecuState == .busy || link.logging)
+    }
+
+    private func connectionStatus(_ title: String, state: LinkState, text: String, symbol: String) -> some View {
+        let color: Color = {
+            switch state {
+            case .ok: return Color(red: 0.10, green: 0.62, blue: 0.34)
+            case .fail: return Color(red: 0.82, green: 0.20, blue: 0.20)
+            case .busy: return Color(red: 0.88, green: 0.55, blue: 0.08)
+            case .idle: return .secondary
+            }
+        }()
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Image(systemName: symbol).font(.system(size: 12, weight: .bold))
+                Text(title).font(.system(size: 12, weight: .bold)).lineLimit(1).minimumScaleFactor(0.8)
+                Spacer(minLength: 2)
+                Circle().fill(color).frame(width: 8, height: 8)
+            }
+            Text(compactStatus(state, text))
+                .font(.system(size: 11, weight: state == .fail ? .medium : .semibold))
+                .foregroundColor(color)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, minHeight: 36, alignment: .topLeading)
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(color.opacity(state == .idle ? 0.08 : 0.22), lineWidth: 1))
+        .accessibilityElement(children: .combine)
+    }
+
+    private func compactStatus(_ state: LinkState, _ text: String) -> String {
+        switch state {
+        case .ok: return "Подключено"
+        case .busy: return "Подключение…"
+        case .idle: return "Ожидает подключения"
+        case .fail:
+            let details = text.components(separatedBy: "\n").dropFirst().joined(separator: " · ")
+            return details.isEmpty ? "Не подключено" : details
+        }
+    }
+
+    private var swipeHint: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "arrow.right")
+            Text("Ошибки")
+            Text("·").foregroundColor(.secondary)
+            Image(systemName: "arrow.left")
+            Text("Логирование")
+        }
+        .font(.system(size: 12, weight: .medium))
+        .foregroundColor(.secondary)
+        .padding(.vertical, 1)
+    }
+
+    private var pageNavigation: some View {
+        let selectedPage = currentPage == 2 ? 1 : ((currentPage == 0 || currentPage == 3) ? 2 : 0)
+        return HStack(spacing: 8) {
+            pageButton("Ошибки", symbol: "exclamationmark.triangle", selected: selectedPage == 0) { currentPage = 1 }
+            pageButton("Подключение", symbol: "antenna.radiowaves.left.and.right", selected: selectedPage == 1) { currentPage = 2 }
+            pageButton("Логирование", symbol: "waveform.path.ecg", selected: selectedPage == 2) { currentPage = 3 }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+        .background(.ultraThinMaterial)
+    }
+
+    private func pageButton(_ title: String, symbol: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: symbol).font(.system(size: 15, weight: .semibold))
+                Text(title).font(.system(size: 10, weight: selected ? .bold : .medium)).lineLimit(1).minimumScaleFactor(0.8)
+            }
+            .foregroundColor(selected ? .cyan : .secondary)
+            .frame(maxWidth: .infinity)
+            .frame(height: 39)
+            .background(selected ? Color.cyan.opacity(0.11) : .clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 
     private var appHeader: some View {
