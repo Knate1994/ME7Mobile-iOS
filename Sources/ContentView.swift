@@ -585,22 +585,48 @@ struct VarPicker: View {
 
     var body: some View {
         NavigationStack {
-            List(filtered) { m in
-                Button {
-                    if sel.contains(m.name) { sel.remove(m.name) } else { sel.insert(m.name) }
-                } label: {
-                    HStack {
-                        Image(systemName: sel.contains(m.name) ? "checkmark.circle.fill" : "circle")
-                        VStack(alignment: .leading) {
-                            Text(m.name).font(.system(.body, design: .monospaced))
-                            Text(m.alias.isEmpty ? m.comment : m.alias)
-                                .font(.caption).foregroundColor(.secondary).lineLimit(1)
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Button {
+                        sel = Set(EcuDef.all.map(\.name))
+                    } label: {
+                        Label("Выбрать все", systemImage: "checkmark.circle.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.cyan)
+                    .disabled(EcuDef.all.allSatisfy { sel.contains($0.name) })
+
+                    Button {
+                        sel.removeAll()
+                    } label: {
+                        Label("Снять все", systemImage: "xmark.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(sel.isEmpty)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+
+                List(filtered) { m in
+                    Button {
+                        if sel.contains(m.name) { sel.remove(m.name) } else { sel.insert(m.name) }
+                    } label: {
+                        HStack {
+                            Image(systemName: sel.contains(m.name) ? "checkmark.circle.fill" : "circle")
+                            VStack(alignment: .leading) {
+                                Text(m.name).font(.system(.body, design: .monospaced))
+                                Text(m.alias.isEmpty ? m.comment : m.alias)
+                                    .font(.caption).foregroundColor(.secondary).lineLimit(1)
+                            }
                         }
                     }
+                    .foregroundColor(.primary)
                 }
-                .foregroundColor(.primary)
+                .listStyle(.plain)
+                .searchable(text: $query)
             }
-            .searchable(text: $query)
             .navigationTitle("Переменные (\(sel.count))")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
