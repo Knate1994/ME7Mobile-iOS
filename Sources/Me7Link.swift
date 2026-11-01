@@ -580,13 +580,13 @@ final class Me7Link: ObservableObject {
                     try record(name) {
                         let setup = try e.connectTP16(target: target.address, baudDivisor: divisor)
                         guard setup.connected else { return BlockScanAttempt(mode: name, state: .noResponse, detail: setup.reason) }
-                        let response = try self.probeBlockKwp(e)
+                        let probe = try self.probeBlockKwp(e)
                         e.disconnectTP16()
-                        if let response = response.response {
-                            return BlockScanAttempt(mode: name, state: .responded, detail: response.detail)
+                        if let _ = probe.response {
+                            return BlockScanAttempt(mode: name, state: .responded, detail: probe.detail)
                         }
                         return BlockScanAttempt(mode: name, state: .channelOnly,
-                                                detail: "транспортный канал открыт; диагностический KWP-ответ не получен (\(response.detail))")
+                                                detail: "транспортный канал открыт; диагностический KWP-ответ не получен (\(probe.detail))")
                     }
                 }
 
@@ -594,13 +594,13 @@ final class Me7Link: ObservableObject {
                     try record(name) {
                         let setup = try e.connectTP20(target: target.address, baudDivisor: divisor)
                         guard setup.connected else { return BlockScanAttempt(mode: name, state: .noResponse, detail: setup.reason) }
-                        let response = try self.probeBlockKwp(e)
+                        let probe = try self.probeBlockKwp(e)
                         e.disconnectTP16()
-                        if let response = response.response {
-                            return BlockScanAttempt(mode: name, state: .responded, detail: response.detail)
+                        if let _ = probe.response {
+                            return BlockScanAttempt(mode: name, state: .responded, detail: probe.detail)
                         }
                         return BlockScanAttempt(mode: name, state: .channelOnly,
-                                                detail: "транспортный канал открыт; диагностический KWP-ответ не получен (\(response.detail))")
+                                                detail: "транспортный канал открыт; диагностический KWP-ответ не получен (\(probe.detail))")
                     }
                 }
             }
