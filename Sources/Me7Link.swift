@@ -250,7 +250,7 @@ final class Me7Link: ObservableObject {
         for link in links {
             setEcu(.busy, (["Инициализация: \(link.label)…"] + results).joined(separator: "\n"))
             t("--- попытка: \(link.label), заголовок \(link.header) ---")
-            _ = try e.cmd("ATPC")
+            try e.prepareKwpMode()
             _ = try e.cmd("ATSP\(link.proto)")
             if link.proto == "3" || link.proto == "4" { _ = try e.cmd("ATIIA\(link.initAddress)") }
             _ = try e.cmd("ATSH\(link.header)")
@@ -308,7 +308,7 @@ final class Me7Link: ObservableObject {
         var failures: [String] = []
         for link in links {
             t("--- \(link.label), заголовок \(link.header) ---")
-            _ = try e.cmd("ATPC")
+            try e.prepareKwpMode()
             _ = try e.cmd("ATSP\(link.proto)")
             if link.proto == "3" || link.proto == "4" { _ = try e.cmd("ATIIA\(link.initAddress)") }
             _ = try e.cmd("ATSH\(link.header)")
@@ -326,9 +326,30 @@ final class Me7Link: ObservableObject {
             _ = try e.cmd("ATPC")
         }
 
+        if module == .transmission || module == .absEsp {
+            t("--- альтернативная попытка: VW TP 1.6 по CAN ---")
+            let targetAddress = Int(target, radix: 16) ?? 0
+            let setup = try e.connectTP16(target: targetAddress)
+            if setup.connected {
+                let (session, error) = try startSession(e, module.sessions)
+                if let session = session {
+                    activeModule = module
+                    let status = "Подключено · VW TP 1.6 / CAN · сессия \(session)"
+                    updateModule(module) { $0.connectionState = .ok; $0.connectionText = status }
+                    t("\(module.title): подключено через TP 1.6, сессия \(session)")
+                    try readSoftwareNumber(e, module: module)
+                    return true
+                }
+                failures.append("VW TP 1.6 / CAN: канал открыт, но KWP-сессия не ответила (\(error))")
+                e.disconnectTP16()
+            } else {
+                failures.append("VW TP 1.6 / CAN: \(setup.reason)")
+            }
+        }
+
         var message = failures.joined(separator: "\n")
         if let hint = module.protocolHint { message += "\n\(hint)" }
-        message += "\nПроверь тип ELM и доступность K-Line этого блока на диагностическом разъёме."
+        message += "\nПроверь питание блока, диагностическую линию (OBD 3/7) и CAN на контактах 6/14."
         moduleConnectionFail(module, message)
         return false
     }
