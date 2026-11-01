@@ -64,6 +64,36 @@ struct ErrorsView: View {
                     }
                 }
 
+                NavigationLink {
+                    BlockScanView(link: link, makeSettings: makeSettings)
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 19, weight: .semibold))
+                            .foregroundStyle(.cyan)
+                            .frame(width: 42, height: 42)
+                            .background(Color.cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Тест блоков")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(.primary)
+                            Text("Опрос возможных адресов и вариантов подключения")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.leading)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(link.clearAllState == .busy)
+
                 Label("Подключение к модулю проверяется отдельно. Если блок не отвечает, причина будет показана на его странице и записана в журнале.", systemImage: "info.circle")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -249,6 +279,10 @@ struct ModuleErrorsView: View {
             } else if diagnostic.codes.isEmpty {
                 emptyMessage("Ошибок нет", symbol: "checkmark.circle.fill", color: .green)
             } else {
+                Label(diagnostic.dtcText, systemImage: "exclamationmark.circle.fill")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
                 ForEach(diagnostic.codes) { code in
                     DtcCard(code: code)
                 }
@@ -296,6 +330,277 @@ private struct DtcCard: View {
         .background(Color.orange.opacity(0.075), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(Color.orange.opacity(0.17), lineWidth: 1))
     }
+}
+
+struct BlockScanView: View {
+    @ObservedObject var link: Me7Link
+    let makeSettings: () -> Settings
+    @AppStorage("blockScanBridgeState") private var bridgeState = "Не указано"
+    @State private var showingTraceShare = false
+
+    private var scanning: Bool { link.blockScanState == .busy }
+    private var answeredCount: Int { link.blockScanResults.filter(\.responded).count }
+    private var channelOnlyCount: Int { link.blockScanResults.filter { !$0.responded && $0.transportOpened }.count }
+    private var checkedWithoutAnswerCount: Int {
+        link.blockScanResults.filter { !$0.responded && !$0.transportOpened && !$0.attempts.isEmpty }.count
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                explanationCard
+                bridgeCard
+                scanButton
+
+                if link.blockScanTotal > 0 {
+                    progressCard
+                    summaryCounts
+                }
+
+                if !link.blockScanResults.isEmpty {
+                    Text("Адреса блоков")
+                        .font(.system(size: 18, weight: .bold))
+                        .padding(.top, 3)
+                    ForEach(link.blockScanResults) { result in
+                        BlockScanResultCard(result: result)
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .navigationTitle("Тест блоков")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    link.prepareTraceExport()
+                    showingTraceShare = true
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .disabled(link.traceFileURL == nil)
+                .accessibilityLabel("Поделиться полной трассой")
+            }
+        }
+        .sheet(isPresented: $showingTraceShare) {
+            if let url = link.traceFileURL {
+                TraceShareSheet(items: [url])
+            }
+        }
+        .onAppear { link.noteBlockScanScreenOpened(bridgeState: bridgeState) }
+        .onChange(of: bridgeState) { newValue in
+            link.noteBlockScanBridgeStateChanged(newValue)
+        }
+    }
+
+    private var explanationCard: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Label("Проверка связи с блоками", systemImage: "waveform.path.ecg")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.cyan)
+            Text("Приложение по очереди опросит известные адреса Cayenne 955 и проверит K-Line fast/slow, VW TP1.6 и TP2.0 по CAN 500/250 кбит/с.")
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Список включает опциональные блоки разных комплектаций. TP2.0 и CAN 250 кбит/с — экспериментальные режимы. Опрос только читает ответы и не стирает ошибки, не кодирует блоки и не запускает исполнительные механизмы. Полная трасса сохраняет команды, ответы, таймауты и итоги с отметками времени.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(15)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+    }
+
+    private var bridgeCard: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label("Перемычка OBD 3–7", systemImage: "cable.connector")
+                .font(.system(size: 14, weight: .semibold))
+            Picker("Состояние перемычки", selection: $bridgeState) {
+                Text("Не указано").tag("Не указано")
+                Text("Разомкнута").tag("Разомкнута")
+                Text("Замкнута").tag("Замкнута")
+            }
+            .pickerStyle(.segmented)
+            Text("Приложение не видит тумблер физически. Если переключишь его во время опроса, сразу отметь новое положение здесь — отметка попадёт в трассу.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var scanButton: some View {
+        Button {
+            if scanning {
+                link.stopBlockScan()
+            } else {
+                link.scanAllBlocks(makeSettings(), bridgeState: bridgeState)
+            }
+        } label: {
+            HStack(spacing: 10) {
+                if scanning {
+                    ProgressView().tint(.white)
+                } else {
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                        .font(.system(size: 18, weight: .bold))
+                }
+                Text(scanning ? "Остановить после текущей проверки" : "Опросить все блоки")
+                    .font(.system(size: 16, weight: .bold))
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
+            .padding(.horizontal, 16)
+            .foregroundStyle(.white)
+            .background(scanning ? Color.orange : Color.cyan, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(link.elmState != .ok && !scanning)
+
+        if link.elmState != .ok && !scanning {
+            Label("Сначала подключи ELM327 на главном экране.", systemImage: "exclamationmark.circle")
+                .font(.footnote)
+                .foregroundStyle(.orange)
+        }
+    }
+
+    private var progressCard: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text("Ход опроса").font(.system(size: 14, weight: .semibold))
+                Spacer()
+                Text("\(link.blockScanProgress) / \(link.blockScanTotal)")
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(value: Double(link.blockScanProgress), total: Double(max(link.blockScanTotal, 1)))
+                .tint(scanning ? .cyan : (link.blockScanState == .fail ? .red : .green))
+            Text(link.blockScanStatus)
+                .font(.footnote)
+                .foregroundStyle(link.blockScanState == .fail ? .red : (scanning ? .orange : .secondary))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var summaryCounts: some View {
+        HStack(spacing: 8) {
+            ScanCount(title: "Ответили", count: answeredCount, color: .green)
+            ScanCount(title: "Канал открыт", count: channelOnlyCount, color: .orange)
+            ScanCount(title: "Без ответа", count: checkedWithoutAnswerCount, color: .secondary)
+        }
+    }
+}
+
+private struct ScanCount: View {
+    let title: String
+    let count: Int
+    let color: Color
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text("\(count)").font(.system(size: 19, weight: .bold, design: .rounded)).foregroundStyle(color)
+            Text(title).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, minHeight: 52)
+        .padding(.horizontal, 5)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+    }
+}
+
+private struct BlockScanResultCard: View {
+    let result: BlockScanResult
+    @State private var expanded = false
+
+    private var color: Color {
+        if result.responded { return .green }
+        if result.transportOpened { return .orange }
+        return result.attempts.isEmpty ? .secondary : .red
+    }
+
+    private var summary: String {
+        if result.responded { return "Получен ответ блока" }
+        if result.transportOpened { return "Транспортный канал есть · KWP молчит" }
+        return result.attempts.isEmpty ? "Ожидает проверки" : "Ответа нет"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 10) {
+                Circle().fill(color).frame(width: 9, height: 9).padding(.top, 5)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("0x\(result.target.addressText) · \(result.target.title)")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.primary)
+                    Text(summary).font(.caption.weight(.medium)).foregroundStyle(color)
+                }
+                Spacer(minLength: 0)
+            }
+
+            if !result.attempts.isEmpty {
+                DisclosureGroup("Подробности · \(result.attempts.count) способов", isExpanded: $expanded) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(result.attempts) { attempt in
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(alignment: .top, spacing: 6) {
+                                    Image(systemName: attemptSymbol(attempt.state))
+                                        .foregroundStyle(attemptColor(attempt.state))
+                                    Text(attempt.mode).font(.caption.weight(.semibold)).foregroundStyle(.primary)
+                                }
+                                Text(attempt.detail)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .padding(.leading, 20)
+                            }
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+                .font(.caption.weight(.medium))
+                .tint(.secondary)
+            }
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(color.opacity(0.14), lineWidth: 1))
+    }
+
+    private func attemptSymbol(_ state: BlockScanAttemptState) -> String {
+        switch state {
+        case .responded: return "checkmark.circle.fill"
+        case .channelOnly: return "circle.lefthalf.filled"
+        case .noResponse: return "xmark.circle.fill"
+        }
+    }
+
+    private func attemptColor(_ state: BlockScanAttemptState) -> Color {
+        switch state {
+        case .responded: return .green
+        case .channelOnly: return .orange
+        case .noResponse: return .red
+        }
+    }
+}
+
+private struct TraceShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 private func stateColor(_ state: LinkState) -> Color {

@@ -191,7 +191,7 @@ final class Elm {
     func connectTP16(target: Int, baudDivisor: Int = 1) throws -> (connected: Bool, reason: String) {
         tp16Channel = nil
         tp20Channel = nil
-        guard (0x00...0x1F).contains(target) else { return (false, "адрес TP 1.6 вне диапазона") }
+        guard (0x00...0xFF).contains(target) else { return (false, "адрес TP 1.6 вне диапазона") }
 
         _ = try cmd("ATPC")
         let options = try cmd("ATPB C0 \(hx(baudDivisor))")
@@ -268,7 +268,7 @@ final class Elm {
     func connectTP20(target: Int, baudDivisor: Int = 1) throws -> (connected: Bool, reason: String) {
         tp16Channel = nil
         tp20Channel = nil
-        guard (0x00...0x1F).contains(target) else { return (false, "адрес TP 2.0 вне диапазона") }
+        guard (0x00...0xFF).contains(target) else { return (false, "адрес TP 2.0 вне диапазона") }
 
         _ = try cmd("ATPC")
         let options = try cmd("ATPB C0 \(hx(baudDivisor))")
@@ -348,6 +348,10 @@ final class Elm {
     }
 
     func disconnectTP16() {
+        if let channel = tp20Channel {
+            _ = try? sendCAN(id: channel.testerCanId, receiveId: channel.ecuCanId,
+                             data: [0xA8], timeout: 0.20, protocolLabel: "VW TP2.0")
+        }
         tp16Channel = nil
         tp20Channel = nil
         _ = try? cmd("ATPC")
