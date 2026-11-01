@@ -559,7 +559,9 @@ final class Me7Link: ObservableObject {
                     let header = "81\(target.addressText)F1"
                     _ = try e.cmd("ATSH\(header)")
                     _ = try e.cmd("ATWM\(header)3E")
-                    return try self.probeBlockKwp(e)
+                    let probe = try self.probeBlockKwp(e)
+                    let state = probe.response.map { _ in BlockScanAttemptState.responded } ?? .noResponse
+                    return BlockScanAttempt(mode: "KWP fast init · K-Line", state: state, detail: probe.detail)
                 }
 
                 try record("KWP slow init · K-Line 5 бод") {
@@ -569,7 +571,9 @@ final class Me7Link: ObservableObject {
                     let header = "C1\(target.addressText)F1"
                     _ = try e.cmd("ATSH\(header)")
                     _ = try e.cmd("ATWM\(header)3E")
-                    return try self.probeBlockKwp(e)
+                    let probe = try self.probeBlockKwp(e)
+                    let state = probe.response.map { _ in BlockScanAttemptState.responded } ?? .noResponse
+                    return BlockScanAttempt(mode: "KWP slow init · K-Line 5 бод", state: state, detail: probe.detail)
                 }
 
                 for (name, divisor) in [("VW TP1.6 · CAN 500 кбит/с", 1), ("VW TP1.6 · CAN 250 кбит/с", 2)] {
