@@ -43,8 +43,10 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
     var sessions: [String] { ["1089", "1086", "1003", "-"] }
     var protocolHint: String? {
         switch self {
-        case .transmission, .absEsp:
-            return "После K-Line приложение также пробует VW TP 1.6 по CAN 500 кбит/с. Некоторые клоны ELM327 не поддерживают пользовательский CAN-режим (AT PB / протокол B)."
+        case .transmission:
+            return "После K-Line приложение также пробует VW TP 1.6 по CAN 500 кбит/с. Некоторые клоны ELM327 не поддерживают CAN USER1 (AT PB / протокол B)."
+        case .absEsp:
+            return "После K-Line проверяются VW TP 1.6 и TP 2.0 по CAN на 500/250 кбит/с. TP 2.0 и CAN 250 кбит/с здесь экспериментальные варианты; клоны ELM327 могут не поддерживать CAN USER1 (AT PB / протокол B)."
         case .suspension:
             return "На части Cayenne 955 блок подвески работает по VW TP 1.6; если KWP2000 не отвечает, проверь поддержку этого режима адаптером."
         case .engine:

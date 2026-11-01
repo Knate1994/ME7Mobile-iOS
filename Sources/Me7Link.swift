@@ -327,23 +327,52 @@ final class Me7Link: ObservableObject {
         }
 
         if module == .transmission || module == .absEsp {
-            t("--- альтернативная попытка: VW TP 1.6 по CAN ---")
             let targetAddress = Int(target, radix: 16) ?? 0
-            let setup = try e.connectTP16(target: targetAddress)
-            if setup.connected {
-                let (session, error) = try startSession(e, module.sessions)
-                if let session = session {
-                    activeModule = module
-                    let status = "Подключено · VW TP 1.6 / CAN · сессия \(session)"
-                    updateModule(module) { $0.connectionState = .ok; $0.connectionText = status }
-                    t("\(module.title): подключено через TP 1.6, сессия \(session)")
-                    try readSoftwareNumber(e, module: module)
-                    return true
+            let tp16Rates = module == .absEsp ? [1, 2] : [1]
+            for divisor in tp16Rates {
+                let baud = divisor == 1 ? 500 : 500 / divisor
+                let label = "VW TP1.6 / CAN \(baud) кбит/с"
+                t("--- альтернативная попытка: \(label) ---")
+                let setup = try e.connectTP16(target: targetAddress, baudDivisor: divisor)
+                if setup.connected {
+                    let (session, error) = try startSession(e, module.sessions)
+                    if let session = session {
+                        activeModule = module
+                        let status = "Подключено · \(label) · сессия \(session)"
+                        updateModule(module) { $0.connectionState = .ok; $0.connectionText = status }
+                        t("\(module.title): подключено через \(label), сессия \(session)")
+                        try readSoftwareNumber(e, module: module)
+                        return true
+                    }
+                    failures.append("\(label): канал открыт, но KWP-сессия не ответила (\(error))")
+                    e.disconnectTP16()
+                } else {
+                    failures.append("\(label): \(setup.reason)")
                 }
-                failures.append("VW TP 1.6 / CAN: канал открыт, но KWP-сессия не ответила (\(error))")
-                e.disconnectTP16()
-            } else {
-                failures.append("VW TP 1.6 / CAN: \(setup.reason)")
+            }
+
+            if module == .absEsp {
+                for divisor in [1, 2] {
+                    let baud = divisor == 1 ? 500 : 500 / divisor
+                    let label = "VW TP2.0 / CAN \(baud) кбит/с"
+                    t("--- альтернативная попытка: \(label) ---")
+                    let setup = try e.connectTP20(target: targetAddress, baudDivisor: divisor)
+                    if setup.connected {
+                        let (session, error) = try startSession(e, module.sessions)
+                        if let session = session {
+                            activeModule = module
+                            let status = "Подключено · \(label) · сессия \(session)"
+                            updateModule(module) { $0.connectionState = .ok; $0.connectionText = status }
+                            t("\(module.title): подключено через \(label), сессия \(session)")
+                            try readSoftwareNumber(e, module: module)
+                            return true
+                        }
+                        failures.append("\(label): канал открыт, но KWP-сессия не ответила (\(error))")
+                        e.disconnectTP16()
+                    } else {
+                        failures.append("\(label): \(setup.reason)")
+                    }
+                }
             }
         }
 

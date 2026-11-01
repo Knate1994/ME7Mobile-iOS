@@ -57,7 +57,15 @@ final class Elm {
         let ecuCanId: Int
         let blockSize: Int
     }
+    private struct TP20Channel {
+        let testerCanId: Int
+        let ecuCanId: Int
+        let blockSize: Int
+        var txSequence: Int
+        var rxSequence: Int
+    }
     private var tp16Channel: TP16Channel?
+    private var tp20Channel: TP20Channel?
     private let nwQueue = DispatchQueue(label: "me7.elm.nw")
     private let lock = NSLock()
     private var buffer = Data()
@@ -115,6 +123,7 @@ final class Elm {
 
     func close() {
         tp16Channel = nil
+        tp20Channel = nil
         conn?.cancel()
         conn = nil
         markClosed()
@@ -159,6 +168,9 @@ final class Elm {
 
     /// Sends a KWP request (hex without spaces), returns the response data bytes (header stripped by ELM, ATH0).
     func request(_ hex: String, timeout: Double = 3) throws -> Response {
+        if tp20Channel != nil, let payload = hexBytes(hex) {
+            return try requestTP20(payload, timeout: timeout)
+        }
         if let channel = tp16Channel, let payload = hexBytes(hex) {
             return try requestTP16(payload, channel: channel, timeout: timeout)
         }
@@ -176,14 +188,15 @@ final class Elm {
 
     /// Opens VW TP 1.6 over the ELM327's user-defined 11-bit, variable-DLC CAN mode.
     /// Target is the vehicle's diagnostic address (for example 0x03 for PSM).
-    func connectTP16(target: Int) throws -> (connected: Bool, reason: String) {
+    func connectTP16(target: Int, baudDivisor: Int = 1) throws -> (connected: Bool, reason: String) {
         tp16Channel = nil
+        tp20Channel = nil
         guard (0x00...0x1F).contains(target) else { return (false, "адрес TP 1.6 вне диапазона") }
 
         _ = try cmd("ATPC")
-        let options = try cmd("ATPB C0 01")
+        let options = try cmd("ATPB C0 \(hx(baudDivisor))")
         guard options.uppercased().contains("OK") else {
-            let reason = options.isEmpty ? "ELM не подтвердил AT PB C0 01" : "ELM не поддержал AT PB C0 01: \(options)"
+            let reason = options.isEmpty ? "ELM не подтвердил настройку CAN USER1" : "ELM не поддержал настройку CAN USER1: \(options)"
             trace("TP1.6: \(reason)")
             restoreKwpMode()
             return (false, reason)
@@ -196,6 +209,9 @@ final class Elm {
             return (false, reason)
         }
 
+        let baud = baudDivisor == 1 ? 500 : 500 / max(1, baudDivisor)
+        let label = "TP1.6 / CAN \(baud) кбит/с"
+
         for command in ["ATCAF0", "ATCFC0", "ATH1", "ATS1", "ATAT0", "ATST20", "ATCRA"] {
             _ = try cmd(command)
         }
@@ -207,7 +223,7 @@ final class Elm {
             let frames = try sendCAN(id: 0x200, receiveId: ecuSetupId,
                                      data: [UInt8(target), 0xC0, UInt8(channelId)], timeout: 0.30)
             guard let reply = frames.first(where: { $0.id == ecuSetupId && $0.data.count >= 3 }) else {
-                trace(String(format: "TP1.6 ChS: CAN 200 → %02X C0 %02X, ответа нет", target, channelId))
+                trace(String(format: "\(label) ChS: CAN 200 → %02X C0 %02X, ответа нет", target, channelId))
                 continue
             }
             guard reply.data[0] == 0x00, reply.data[1] == 0xD0 else {
@@ -223,21 +239,22 @@ final class Elm {
             }
             let testerDataId = 0x700 + channelId
             let ecuDataId = 0x700 + Int(reply.data[2])
-            trace(String(format: "TP1.6 канал открыт: tester CAN %03X, ECU CAN %03X", testerDataId, ecuDataId))
+            trace(String(format: "\(label) канал открыт: tester CAN %03X, ECU CAN %03X", testerDataId, ecuDataId))
 
             // Use a one-frame block to keep acknowledgements manageable over the ELM TCP bridge.
             // T1/T2/T4 are 1008 ms; T3 is 10.08 ms (the TP 1.6 time encoding).
             let connectFrames = try sendCAN(id: testerDataId, receiveId: ecuDataId,
-                                            data: [0xA0, 0x01, 0xD0, 0xD0, 0x50, 0xD0], timeout: 0.30)
+                                            data: [0xA0, 0x01, 0xD0, 0xD0, 0x50, 0xD0], timeout: 0.30,
+                                            protocolLabel: label)
             guard let ack = connectFrames.first(where: { $0.id == ecuDataId && $0.data.count >= 6 && $0.data[0] == 0xA1 }) else {
                 lastReason = "канал создан, но ECU не подтвердил соединение TPDU"
-                trace("TP1.6: \(lastReason)")
+                trace("\(label): \(lastReason)")
                 continue
             }
             let ecuBlockSize = max(1, Int(ack.data[1] & 0x0F))
             tp16Channel = TP16Channel(testerCanId: testerDataId, ecuCanId: ecuDataId,
                                       blockSize: min(1, ecuBlockSize))
-            trace(String(format: "TP1.6 соединение подтверждено: CAN %03X → %03X, блок %d", testerDataId, ecuDataId, ecuBlockSize))
+            trace(String(format: "\(label) соединение подтверждено: CAN %03X → %03X, блок %d", testerDataId, ecuDataId, ecuBlockSize))
             return (true, "соединение TP 1.6 установлено")
         }
 
@@ -246,14 +263,100 @@ final class Elm {
         return (false, lastReason)
     }
 
+    /// Opens the dynamic VW TP 2.0 channel used by some older VAG ECUs for KWP2000.
+    /// Logical destination 0x03 is the PSM/ABS-ESP address used by this Cayenne profile.
+    func connectTP20(target: Int, baudDivisor: Int = 1) throws -> (connected: Bool, reason: String) {
+        tp16Channel = nil
+        tp20Channel = nil
+        guard (0x00...0x1F).contains(target) else { return (false, "адрес TP 2.0 вне диапазона") }
+
+        _ = try cmd("ATPC")
+        let options = try cmd("ATPB C0 \(hx(baudDivisor))")
+        guard options.uppercased().contains("OK") else {
+            let reason = options.isEmpty ? "ELM не подтвердил настройку CAN USER1" : "ELM не поддержал настройку CAN USER1: \(options)"
+            trace("TP2.0: \(reason)")
+            restoreKwpMode()
+            return (false, reason)
+        }
+        let protocolReply = try cmd("ATSPB")
+        guard protocolReply.uppercased().contains("OK") else {
+            let reason = protocolReply.isEmpty ? "ELM не подтвердил протокол B" : "ELM не включил протокол B: \(protocolReply)"
+            trace("TP2.0: \(reason)")
+            restoreKwpMode()
+            return (false, reason)
+        }
+
+        let baud = baudDivisor == 1 ? 500 : 500 / max(1, baudDivisor)
+        let label = "VW TP2.0 / CAN \(baud) кбит/с"
+        for command in ["ATCAF0", "ATCFC0", "ATH1", "ATS1", "ATAT0", "ATST64", "ATCRA"] {
+            _ = try cmd(command)
+        }
+
+        let setupId = 0x200 + target
+        let setup = try sendCAN(id: 0x200, receiveId: setupId,
+                                data: [UInt8(target), 0xC0, 0x00, 0x10, 0x00, 0x03, 0x01],
+                                timeout: 0.60, protocolLabel: label)
+        guard let reply = setup.first(where: { $0.id == setupId && $0.data.count >= 7 }),
+              reply.data[1] == 0xD0 else {
+            let detail = setup.first(where: { $0.id == setupId })?.data.map { hx(Int($0)) }.joined(separator: " ")
+            let reason = detail.map { "нет положительного Channel Setup ответа (\($0))" } ?? "блок не ответил на Channel Setup CAN 200"
+            trace("\(label): \(reason)")
+            _ = try cmd("ATPC")
+            restoreKwpMode()
+            return (false, reason)
+        }
+
+        guard reply.data[0] == 0x00, reply.data[6] == 0x01,
+              (reply.data[3] & 0xF0) == 0, (reply.data[5] & 0xF0) == 0 else {
+            let reason = "неожиданные параметры Channel Setup: \(reply.data.map { hx(Int($0)) }.joined(separator: " "))"
+            trace("\(label): \(reason)")
+            _ = try cmd("ATPC")
+            restoreKwpMode()
+            return (false, reason)
+        }
+
+        let ecuCanId = Int(reply.data[2]) | ((Int(reply.data[3] & 0x0F)) << 8)
+        let testerCanId = Int(reply.data[4]) | ((Int(reply.data[5] & 0x0F)) << 8)
+        guard (0x100...0x7FF).contains(ecuCanId), (0x100...0x7FF).contains(testerCanId) else {
+            let reason = String(format: "ECU вернул некорректные CAN-ID: tester %03X, ECU %03X", testerCanId, ecuCanId)
+            trace("\(label): \(reason)")
+            _ = try cmd("ATPC")
+            restoreKwpMode()
+            return (false, reason)
+        }
+        trace(String(format: "\(label): динамический канал открыт, tester CAN %03X, ECU CAN %03X", testerCanId, ecuCanId))
+
+        let parameterFrames = try sendCAN(id: testerCanId, receiveId: ecuCanId,
+                                          data: [0xA0, 0x01, 0x8A, 0xFF, 0x4A, 0xFF],
+                                          timeout: 0.60, protocolLabel: label)
+        guard let parameters = parameterFrames.first(where: {
+            $0.id == ecuCanId && $0.data.count >= 6 && $0.data[0] == 0xA1
+        }), parameters.data[1] > 0 else {
+            let reason = "канал открыт, но согласование TPDU (A0/A1) не завершилось"
+            trace("\(label): \(reason)")
+            _ = try? sendCAN(id: testerCanId, receiveId: ecuCanId, data: [0xA8], timeout: 0.20, protocolLabel: label)
+            _ = try cmd("ATPC")
+            restoreKwpMode()
+            return (false, reason)
+        }
+
+        let blockSize = min(1, Int(parameters.data[1]))
+        tp20Channel = TP20Channel(testerCanId: testerCanId, ecuCanId: ecuCanId,
+                                  blockSize: max(1, blockSize), txSequence: 0, rxSequence: 0)
+        trace("\(label): параметры согласованы, подтверждение через 1 кадр")
+        return (true, "соединение VW TP2.0 установлено")
+    }
+
     func disconnectTP16() {
         tp16Channel = nil
+        tp20Channel = nil
         _ = try? cmd("ATPC")
         restoreKwpMode()
     }
 
     func prepareKwpMode() throws {
         tp16Channel = nil
+        tp20Channel = nil
         _ = try cmd("ATPC")
         for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATST64", "ATCRA"] {
             _ = try cmd(command)
@@ -271,7 +374,8 @@ final class Elm {
         let data: [UInt8]
     }
 
-    private func sendCAN(id: Int, receiveId: Int, data: [UInt8], timeout: Double) throws -> [CANFrame] {
+    private func sendCAN(id: Int, receiveId: Int, data: [UInt8], timeout: Double,
+                         protocolLabel: String = "TP1.6") throws -> [CANFrame] {
         guard !data.isEmpty, data.count <= 8 else { return [] }
         _ = try cmd("ATCRA \(hx(receiveId, 3))")
         _ = try cmd("ATSH \(hx(id, 3))")
@@ -287,13 +391,101 @@ final class Elm {
             frames.append(CANFrame(id: id, data: bytes.map { UInt8(clamping: $0) }))
         }
         if frames.isEmpty {
-            trace("TP1.6 CAN \(hx(id, 3)) → \(data.map { hx(Int($0)) }.joined(separator: " ")): \(response.isEmpty ? "нет ответа" : response)")
+            trace("\(protocolLabel) CAN \(hx(id, 3)) → \(data.map { hx(Int($0)) }.joined(separator: " ")): \(response.isEmpty ? "нет ответа" : response)")
         } else {
             for frame in frames {
-                trace("TP1.6 CAN \(hx(id, 3)) → \(data.map { hx(Int($0)) }.joined(separator: " ")); ← \(hx(frame.id, 3)) \(frame.data.map { hx(Int($0)) }.joined(separator: " "))")
+                trace("\(protocolLabel) CAN \(hx(id, 3)) → \(data.map { hx(Int($0)) }.joined(separator: " ")); ← \(hx(frame.id, 3)) \(frame.data.map { hx(Int($0)) }.joined(separator: " "))")
             }
         }
         return frames
+    }
+
+    private func requestTP20(_ payload: [Int], timeout: Double) throws -> Response {
+        guard var channel = tp20Channel else { return Response(bytes: [], errors: ["TP2.0: канал не открыт"]) }
+        guard !payload.isEmpty, payload.count <= 2048 else {
+            return Response(bytes: [], errors: ["TP2.0: некорректная длина KWP-запроса"])
+        }
+
+        let length = payload.count
+        var stream: [UInt8] = [UInt8((length >> 8) & 0xFF), UInt8(length & 0xFF)]
+        stream += payload.map { UInt8(clamping: $0) }
+        var pending: [CANFrame] = []
+        let label = "VW TP2.0"
+
+        while !stream.isEmpty {
+            // The CAN frame has one TP header byte; the first frame also carries
+            // the two-byte KWP length, leaving five payload bytes in total.
+            let capacity = 7
+            let count = min(capacity, stream.count)
+            let chunk = Array(stream.prefix(count))
+            stream.removeFirst(count)
+            let isLast = stream.isEmpty
+            let sequence = channel.txSequence
+            let opcode: UInt8 = isLast ? 0x10 : 0x00 // block size 1: acknowledge every frame
+            var frame: [UInt8] = [opcode | UInt8(sequence)]
+            frame += chunk
+            let replies = try sendCAN(id: channel.testerCanId, receiveId: channel.ecuCanId,
+                                      data: frame, timeout: max(0.40, min(timeout, 1.0)), protocolLabel: label)
+            channel.txSequence = (channel.txSequence + 1) & 0x0F
+            var sawAck = false
+            for reply in replies where reply.id == channel.ecuCanId && !reply.data.isEmpty {
+                let replyOpcode = Int(reply.data[0] >> 4)
+                if replyOpcode == 0xB {
+                    if Int(reply.data[0] & 0x0F) == channel.txSequence { sawAck = true }
+                } else {
+                    pending.append(reply)
+                }
+            }
+            guard sawAck else {
+                tp20Channel = channel
+                return Response(bytes: [], errors: ["TP2.0: ECU не подтвердил кадр запроса"])
+            }
+        }
+
+        var result: [Int] = []
+        var expectedLength: Int?
+        var frameCount = 0
+        var index = 0
+        while index < pending.count && frameCount < 512 {
+            let frame = pending[index]
+            index += 1
+            guard frame.id == channel.ecuCanId, !frame.data.isEmpty else { continue }
+            let opcode = Int(frame.data[0] >> 4)
+            let sequence = Int(frame.data[0] & 0x0F)
+            if opcode == 0xB || opcode == 0x9 { continue }
+            guard (0...3).contains(opcode), frame.data.count >= 2 else { continue }
+            guard sequence == channel.rxSequence else {
+                tp20Channel = channel
+                return Response(bytes: result, errors: [String(format: "TP2.0: неверный номер кадра ответа, ожидался %X, получен %X", channel.rxSequence, sequence)])
+            }
+            frameCount += 1
+            channel.rxSequence = (sequence + 1) & 0x0F
+            if expectedLength == nil {
+                guard frame.data.count >= 4 else {
+                    tp20Channel = channel
+                    return Response(bytes: [], errors: ["TP2.0: в первом кадре ответа нет длины сообщения"])
+                }
+                expectedLength = (Int(frame.data[1]) << 8) | Int(frame.data[2])
+                result += frame.data.dropFirst(3).map(Int.init)
+            } else {
+                result += frame.data.dropFirst().map(Int.init)
+            }
+
+            if opcode == 0x0 || opcode == 0x1 {
+                let ack = try sendCAN(id: channel.testerCanId, receiveId: channel.ecuCanId,
+                                      data: [0xB0 | UInt8(channel.rxSequence)], timeout: 0.40,
+                                      protocolLabel: label)
+                pending += ack
+            }
+            if opcode == 0x1 || opcode == 0x3 {
+                let count = min(expectedLength ?? result.count, result.count)
+                tp20Channel = channel
+                return Response(bytes: Array(result.prefix(count)), errors: [])
+            }
+        }
+
+        tp20Channel = channel
+        return Response(bytes: [], errors: ["TP2.0: нет полного KWP-ответа от ECU"])
     }
 
     private func requestTP16(_ payload: [Int], channel: TP16Channel, timeout: Double) throws -> Response {
