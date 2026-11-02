@@ -135,8 +135,8 @@ struct LoggingScreen: View {
                 }
 
                 panel {
-                    heading("Дополнительный OBD-опрос", detail: "Стандартный PID 01 66 для сравнения", symbol: "wind")
-                    Toggle("Добавлять значения PID 01 66 A/B в CSV", isOn: $includeMafPair)
+                    heading("Дополнительный OBD-опрос", detail: "Стандартный PID 01 66: ДМРВ 1/2", symbol: "wind")
+                    Toggle("Добавлять значения PID 01 66 для ДМРВ 1/2 в CSV", isOn: $includeMafPair)
                         .tint(.cyan)
                         .disabled(link.logging)
                     Button {

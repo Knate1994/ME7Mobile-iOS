@@ -1162,7 +1162,7 @@ final class Me7Link: ObservableObject {
         guard !logging else { return }
         ui { self.mafProbeState = .busy; self.mafProbeText = "Проверка поддержки PID 01 66…" }
         job({ msg in
-            self.t("ОШИБКА ПРОВЕРКИ ДМРВ A/B: \(msg)")
+            self.t("ОШИБКА ПРОВЕРКИ PID 01 66 для ДМРВ 1/2: \(msg)")
             self.ui { self.mafProbeState = .fail; self.mafProbeText = "Проверка не удалась: \(msg)" }
         }) {
             guard let e = self.elm, self.ecuOk, self.activeModule == .engine else {
@@ -1188,14 +1188,14 @@ final class Me7Link: ObservableObject {
             return
         }
         guard reading.supportsAny else {
-            let text = "PID 01 66 ответил, но ЭБУ не отметил поддержку ДМРВ A или B (\(response))"
+            let text = "PID 01 66 ответил, но ЭБУ не отметил поддержку ДМРВ 1 или 2 (\(response))"
             t(text)
             ui { self.mafProbeState = .fail; self.mafProbeText = text }
             return
         }
         let a = reading.supportsA ? String(format: "%.2f г/с", reading.flowA ?? 0) : "не поддерживается"
         let b = reading.supportsB ? String(format: "%.2f г/с", reading.flowB ?? 0) : "не поддерживается"
-        let text = "Расход: ДМРВ A — \(a); ДМРВ B — \(b)"
+        let text = "Расход: ДМРВ 1 — \(a); ДМРВ 2 — \(b)"
         t("PID 01 66: \(text); ответ \(response)")
         ui { self.mafProbeState = .ok; self.mafProbeText = text }
     }
@@ -1395,7 +1395,7 @@ final class Me7Link: ObservableObject {
         var extraUnits: [String] = []
         if hasActualBoost { extraNames.append("boost_actual_gauge"); extraUnits.append("mbar(g)") }
         if hasRequestedBoost { extraNames.append("boost_target_gauge"); extraUnits.append("mbar(g)") }
-        let mafNames = includeMafPair ? ["maf_a_obd_g_s", "maf_b_obd_g_s"] : []
+        let mafNames = includeMafPair ? ["maf1_obd_g_s", "maf2_obd_g_s"] : []
         let mafUnits = includeMafPair ? ["g/s", "g/s"] : []
         w("TimeStamp," + (vars.map { $0.name } + extraNames + mafNames).joined(separator: ",") + "\n")
         w("s," + (vars.map { $0.displayUnit } + extraUnits + mafUnits).joined(separator: ",") + "\n")
@@ -1518,8 +1518,8 @@ final class Me7Link: ObservableObject {
                 let b = mafReading?.flowB
                 outputFields.append(a.map(fmt) ?? "")
                 outputFields.append(b.map(fmt) ?? "")
-                if let a { derivedLive.append(LiveValue(id: "maf_a_obd_g_s", label: "ДМРВ A · расход по OBD", value: a, unit: "г/с")) }
-                if let b { derivedLive.append(LiveValue(id: "maf_b_obd_g_s", label: "ДМРВ B · расход по OBD", value: b, unit: "г/с")) }
+                if let a { derivedLive.append(LiveValue(id: "maf1_obd_g_s", label: "ДМРВ 1 · расход по OBD", value: a, unit: "г/с")) }
+                if let b { derivedLive.append(LiveValue(id: "maf2_obd_g_s", label: "ДМРВ 2 · расход по OBD", value: b, unit: "г/с")) }
             }
             w(String(format: "%.3f", Date().timeIntervalSince(t0)) + "," + outputFields.joined(separator: ",") + "\n")
             samples += 1
