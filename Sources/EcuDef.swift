@@ -83,9 +83,14 @@ struct Measurement: Identifiable, Hashable {
         "B_ldob": "Активно ограничение избыточного наддува",
         "B_lambts": "Активна защита двигателя по лямбде",
         "tateout": "Клапан продувки адсорбера · скважность управления",
-        "mshfm_w": "Расход воздуха ДМРВ · канал из карты ЭБУ",
+        "mshfm_w": "Общий расход воздуха по двум ДМРВ",
+        "mlhfmm_w": "Средний расход ДМРВ A до общей коррекции",
+        "mshfm_a_w": "Расход ДМРВ A · отдельный канал",
+        "mshfm_b_w": "Расход ДМРВ B · отдельный канал",
+        "uhfm_a_w": "Напряжение ДМРВ A · аналоговый вход",
+        "uhfm_b_w": "Напряжение ДМРВ B · аналоговый вход",
         "msdk_w": "Расход воздуха через дроссель",
-        "uhfm_w": "Напряжение ДМРВ · канал из карты ЭБУ",
+        "uhfm_w": "Напряжение HFM · значение стандартной карты",
         "lamsoni_w": "Фактическая лямбда · ряд 1 · широкополосный зонд до катализатора",
         "lamsoni2_w": "Фактическая лямбда · ряд 2 · широкополосный зонд до катализатора",
         "lamsbg_w": "Заданная лямбда после ограничителей · ряд 1",
@@ -258,19 +263,41 @@ enum EcuDef {
                 bitmask: Int(g(5), radix: 16) ?? 0, unit: g(6), signed: g(7) == "1", inverse: g(8) == "1",
                 factor: Double(g(9)) ?? 1, offset: Double(g(10)) ?? 0, comment: g(11)))
         }
+        // kai.ecu omits the two per-meter paths present in this firmware.
+        // 0x3808A6 -> lookup/average -> 0x00F9AE; 0x3808A4 -> lookup/average -> 0x00F9B0.
+        // The two corrected flow contributions are summed into mshfm_w at 0x00F9B4.
+        let firmwareMafChannels = [
+            Measurement(name: "mshfm_a_w", alias: "", address: 0x00F9AE, size: 2, bitmask: 0,
+                        unit: "g/s", signed: false, inverse: false, factor: 0.0277778, offset: 0,
+                        comment: "Отдельный расход ДМРВ A; вход 0x3808A6, вклад в общий mshfm_w"),
+            Measurement(name: "mshfm_b_w", alias: "", address: 0x00F9B0, size: 2, bitmask: 0,
+                        unit: "g/s", signed: false, inverse: false, factor: 0.0277778, offset: 0,
+                        comment: "Отдельный расход ДМРВ B; вход 0x3808A4, вклад в общий mshfm_w"),
+            Measurement(name: "uhfm_a_w", alias: "", address: 0x003808A6, size: 2, bitmask: 0,
+                        unit: "V", signed: false, inverse: false, factor: 0.00488281, offset: 0,
+                        comment: "АЦП входа ДМРВ A; масштаб 5 В / 1024"),
+            Measurement(name: "uhfm_b_w", alias: "", address: 0x003808A4, size: 2, bitmask: 0,
+                        unit: "V", signed: false, inverse: false, factor: 0.00488281, offset: 0,
+                        comment: "АЦП входа ДМРВ B; масштаб 5 В / 1024"),
+        ]
+        let existingNames = Set(out.map(\.name))
+        out.append(contentsOf: firmwareMafChannels.filter { !existingNames.contains($0.name) })
         return out
     }
 
-    /// Ready-made variable sets (names that exist in kai.ecu).
+    /// Ready-made sets may include firmware-derived channels omitted from kai.ecu.
     static let presets: [(String, [String])] = [
         ("Наддув", ["nmot", "gangi", "wped_w", "wdkba", "rl_w", "rlsol_w", "rlmax_w", "plsol_w",
-                    "pvdkds_w", "pus_w", "ldtvm", "ldtvr_w", "ldrlts_w", "mshfm_w", "B_ldsua", "B_ldsuad",
+                    "pvdkds_w", "pus_w", "ldtvm", "ldtvr_w", "ldrlts_w", "mshfm_w", "mshfm_a_w", "mshfm_b_w",
+                    "uhfm_a_w", "uhfm_b_w", "B_ldsua", "B_ldsuad",
                     "B_ldsuas", "zwout", "dwkrz_0", "dwkrz_1", "dwkrz_2", "dwkrz_3", "dwkrz_4", "dwkrz_5",
                     "dwkrz_6", "dwkrz_7", "tans", "tmot", "lamsoni_w", "lamsoni2_w"]),
         ("Детонация", ["nmot", "rl_w", "zwout", "dwkrz_0", "dwkrz_1", "dwkrz_2", "dwkrz_3",
                        "dwkrz_4", "dwkrz_5", "dwkrz_6", "dwkrz_7", "wkrm", "tans"]),
         ("Лямбда", ["nmot", "rl_w", "lamsbg_w", "lamfa_w", "lambts_w", "lamsoni_w", "lamsoni2_w",
-                    "fr_w", "fr2_w", "ti_b1", "ti_b2", "mshfm_w"]),
+                    "fr_w", "fr2_w", "ti_b1", "ti_b2", "mshfm_w", "mshfm_a_w", "mshfm_b_w",
+                    "uhfm_a_w", "uhfm_b_w"]),
+        ("ДМРВ A/B", ["nmot", "mshfm_a_w", "mshfm_b_w", "mshfm_w", "uhfm_a_w", "uhfm_b_w"]),
         ("Базовый", ["nmot", "vfzg", "gangi", "wped_w", "wdkba", "rl_w", "zwout", "tmot", "tans", "ub"]),
     ]
 }

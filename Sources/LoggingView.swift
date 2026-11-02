@@ -135,14 +135,14 @@ struct LoggingScreen: View {
                 }
 
                 panel {
-                    heading("Два ДМРВ", detail: "Раздельный расход через стандартный PID 01 66", symbol: "wind")
-                    Toggle("Добавлять расход ДМРВ A/B в запись", isOn: $includeMafPair)
+                    heading("Дополнительный OBD-опрос", detail: "Стандартный PID 01 66 для сравнения", symbol: "wind")
+                    Toggle("Добавлять значения PID 01 66 A/B в CSV", isOn: $includeMafPair)
                         .tint(.cyan)
                         .disabled(link.logging)
                     Button {
                         link.probeMafPair()
                     } label: {
-                        Label("Проверить поддержку двух ДМРВ", systemImage: "waveform.path.ecg")
+                        Label("Проверить PID 01 66", systemImage: "waveform.path.ecg")
                             .font(.system(size: 14, weight: .semibold))
                             .frame(maxWidth: .infinity)
                             .frame(minHeight: 42)
