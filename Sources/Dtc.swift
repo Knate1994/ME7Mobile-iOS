@@ -90,7 +90,7 @@ struct BlockScanTarget: Identifiable, Hashable {
         .init(address: 0x07, title: "PCM / передний инфоблок"),
         .init(address: 0x08, title: "Климат-контроль"),
         .init(address: 0x09, title: "Центральная электрика (VES)"),
-        .init(address: 0x10, title: "Парковочная система · вариант 2"),
+        .init(address: 0x10, title: "Неоднозначный fast-init адрес · ЭБУ / ParkAssist"),
         .init(address: 0x14, title: "Подвеска · вариант адреса"),
         .init(address: 0x15, title: "Airbag / SRS"),
         .init(address: 0x16, title: "Электроника рулевой колонки"),
@@ -135,6 +135,7 @@ struct BlockScanTarget: Identifiable, Hashable {
 
 enum BlockScanAttemptState: Equatable {
     case responded
+    case negativeResponse
     case channelOnly
     case noResponse
 }
@@ -151,6 +152,7 @@ struct BlockScanResult: Identifiable, Equatable {
     var attempts: [BlockScanAttempt] = []
     var id: Int { target.address }
     var responded: Bool { attempts.contains { $0.state == .responded } }
+    var receivedNegativeResponse: Bool { attempts.contains { $0.state == .negativeResponse } }
     var transportOpened: Bool { attempts.contains { $0.state == .channelOnly } }
 }
 

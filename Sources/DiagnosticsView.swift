@@ -340,9 +340,16 @@ struct BlockScanView: View {
 
     private var scanning: Bool { link.blockScanState == .busy }
     private var answeredCount: Int { link.blockScanResults.filter(\.responded).count }
-    private var channelOnlyCount: Int { link.blockScanResults.filter { !$0.responded && $0.transportOpened }.count }
+    private var negativeResponseCount: Int {
+        link.blockScanResults.filter { !$0.responded && $0.receivedNegativeResponse }.count
+    }
+    private var channelOnlyCount: Int {
+        link.blockScanResults.filter { !$0.responded && !$0.receivedNegativeResponse && $0.transportOpened }.count
+    }
     private var checkedWithoutAnswerCount: Int {
-        link.blockScanResults.filter { !$0.responded && !$0.transportOpened && !$0.attempts.isEmpty }.count
+        link.blockScanResults.filter {
+            !$0.responded && !$0.receivedNegativeResponse && !$0.transportOpened && !$0.attempts.isEmpty
+        }.count
     }
 
     var body: some View {
@@ -492,8 +499,9 @@ struct BlockScanView: View {
     }
 
     private var summaryCounts: some View {
-        HStack(spacing: 8) {
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
             ScanCount(title: "Ответили", count: answeredCount, color: .green)
+            ScanCount(title: "Ответили отказом", count: negativeResponseCount, color: .purple)
             ScanCount(title: "Канал открыт", count: channelOnlyCount, color: .orange)
             ScanCount(title: "Без ответа", count: checkedWithoutAnswerCount, color: .secondary)
         }
@@ -522,12 +530,14 @@ private struct BlockScanResultCard: View {
 
     private var color: Color {
         if result.responded { return .green }
+        if result.receivedNegativeResponse { return .purple }
         if result.transportOpened { return .orange }
         return result.attempts.isEmpty ? .secondary : .red
     }
 
     private var summary: String {
         if result.responded { return "Получен ответ блока" }
+        if result.receivedNegativeResponse { return "ECU ответил, но отказал в проверочном сервисе" }
         if result.transportOpened { return "Транспортный канал есть · KWP молчит" }
         return result.attempts.isEmpty ? "Ожидает проверки" : "Ответа нет"
     }
@@ -579,6 +589,7 @@ private struct BlockScanResultCard: View {
     private func attemptSymbol(_ state: BlockScanAttemptState) -> String {
         switch state {
         case .responded: return "checkmark.circle.fill"
+        case .negativeResponse: return "exclamationmark.circle.fill"
         case .channelOnly: return "circle.lefthalf.filled"
         case .noResponse: return "xmark.circle.fill"
         }
@@ -587,6 +598,7 @@ private struct BlockScanResultCard: View {
     private func attemptColor(_ state: BlockScanAttemptState) -> Color {
         switch state {
         case .responded: return .green
+        case .negativeResponse: return .purple
         case .channelOnly: return .orange
         case .noResponse: return .red
         }

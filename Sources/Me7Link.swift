@@ -488,7 +488,7 @@ final class Me7Link: ObservableObject {
             self.blockScanState = .busy
             self.blockScanStatus = "Подготовка полного опроса…"
             self.blockScanProgress = 0
-            self.blockScanTotal = BlockScanTarget.cayenne955.count * 6
+            self.blockScanTotal = BlockScanTarget.cayenne955.count * 6 + 1
             self.blockScanResults = BlockScanTarget.cayenne955.map { BlockScanResult(target: $0) }
         }
         job({ message in
@@ -517,10 +517,10 @@ final class Me7Link: ObservableObject {
             e.disconnectTP16()
 
             let targets = BlockScanTarget.cayenne955
-            let total = targets.count * 6
+            let total = targets.count * 6 + 1
             var progress = 0
             var results = targets.map { BlockScanResult(target: $0) }
-            self.t("Кандидатов адресов: \(targets.count); проверок транспорта: \(total)")
+            self.t("Кандидатов адресов: \(targets.count); проверок транспорта и сценариев подключения: \(total)")
             self.t("Адреса: \(targets.map { "0x\($0.addressText) \($0.title)" }.joined(separator: "; "))")
             self.t("Проверки только читающие: KWP идентификация/сессия, TP1.6 и TP2.0. Очистка, кодирование и исполнительные тесты не выполняются.")
 
@@ -544,6 +544,7 @@ final class Me7Link: ObservableObject {
                     let stateText: String
                     switch attempt.state {
                     case .responded: stateText = "ОТВЕТИЛ"
+                    case .negativeResponse: stateText = "ОТВЕТИЛ ОТКАЗОМ НА СЕРВИС"
                     case .channelOnly: stateText = "КАНАЛ ОТКРЫТ, KWP МОЛЧИТ"
                     case .noResponse: stateText = "НЕТ ОТВЕТА"
                     }
@@ -553,6 +554,12 @@ final class Me7Link: ObservableObject {
                     self.flushTraceFile()
                 }
 
+                if target.address == 0x01 {
+                    try record("Сценарий главного экрана · подключение двигателя") {
+                        try self.probeMainEngineConnection(e, s)
+                    }
+                }
+
                 try record("KWP fast init · K-Line") {
                     try e.prepareKwpMode()
                     _ = try e.cmd("ATSP5")
@@ -560,8 +567,7 @@ final class Me7Link: ObservableObject {
                     _ = try e.cmd("ATSH\(header)")
                     _ = try e.cmd("ATWM\(header)3E")
                     let probe = try self.probeBlockKwp(e)
-                    let state = probe.response.map { _ in BlockScanAttemptState.responded } ?? .noResponse
-                    return BlockScanAttempt(mode: "KWP fast init · K-Line", state: state, detail: probe.detail)
+                    return BlockScanAttempt(mode: "KWP fast init · K-Line", state: probe.state, detail: probe.detail)
                 }
 
                 try record("KWP slow init · K-Line 5 бод") {
@@ -572,8 +578,7 @@ final class Me7Link: ObservableObject {
                     _ = try e.cmd("ATSH\(header)")
                     _ = try e.cmd("ATWM\(header)3E")
                     let probe = try self.probeBlockKwp(e)
-                    let state = probe.response.map { _ in BlockScanAttemptState.responded } ?? .noResponse
-                    return BlockScanAttempt(mode: "KWP slow init · K-Line 5 бод", state: state, detail: probe.detail)
+                    return BlockScanAttempt(mode: "KWP slow init · K-Line 5 бод", state: probe.state, detail: probe.detail)
                 }
 
                 for (name, divisor) in [("VW TP1.6 · CAN 500 кбит/с", 1), ("VW TP1.6 · CAN 250 кбит/с", 2)] {
@@ -582,8 +587,8 @@ final class Me7Link: ObservableObject {
                         guard setup.connected else { return BlockScanAttempt(mode: name, state: .noResponse, detail: setup.reason) }
                         let probe = try self.probeBlockKwp(e)
                         e.disconnectTP16()
-                        if let _ = probe.response {
-                            return BlockScanAttempt(mode: name, state: .responded, detail: probe.detail)
+                        if probe.state == .responded || probe.state == .negativeResponse {
+                            return BlockScanAttempt(mode: name, state: probe.state, detail: probe.detail)
                         }
                         return BlockScanAttempt(mode: name, state: .channelOnly,
                                                 detail: "транспортный канал открыт; диагностический KWP-ответ не получен (\(probe.detail))")
@@ -596,8 +601,8 @@ final class Me7Link: ObservableObject {
                         guard setup.connected else { return BlockScanAttempt(mode: name, state: .noResponse, detail: setup.reason) }
                         let probe = try self.probeBlockKwp(e)
                         e.disconnectTP16()
-                        if let _ = probe.response {
-                            return BlockScanAttempt(mode: name, state: .responded, detail: probe.detail)
+                        if probe.state == .responded || probe.state == .negativeResponse {
+                            return BlockScanAttempt(mode: name, state: probe.state, detail: probe.detail)
                         }
                         return BlockScanAttempt(mode: name, state: .channelOnly,
                                                 detail: "транспортный канал открыт; диагностический KWP-ответ не получен (\(probe.detail))")
@@ -607,11 +612,12 @@ final class Me7Link: ObservableObject {
 
             e.disconnectTP16()
             let replied = results.filter(\.responded).count
-            let channelOnly = results.filter { !$0.responded && $0.transportOpened }.count
+            let negative = results.filter { !$0.responded && $0.receivedNegativeResponse }.count
+            let channelOnly = results.filter { !$0.responded && !$0.receivedNegativeResponse && $0.transportOpened }.count
             let stopped = self.shouldStopBlockScan
             let summary = stopped
-                ? "Остановлено пользователем: \(progress)/\(total) проверок; ответили \(replied) блоков, ещё \(channelOnly) открыли только транспортный канал."
-                : "Завершено: ответили \(replied) блоков; ещё \(channelOnly) открыли только транспортный канал."
+                ? "Остановлено пользователем: \(progress)/\(total) проверок; положительно ответили \(replied), отказали в проверочном сервисе \(negative), открыли только канал \(channelOnly)."
+                : "Завершено: положительно ответили \(replied), отказали в проверочном сервисе \(negative), открыли только канал \(channelOnly)."
             self.t("=== ИТОГ ПОЛНОГО ОПРОСА ===")
             self.t(summary)
             self.ui {
@@ -633,32 +639,85 @@ final class Me7Link: ObservableObject {
         ui { self.blockScanStatus = "Останавливаю после текущей пробы…" }
     }
 
-    private func probeBlockKwp(_ e: Elm) throws -> (response: Response?, detail: String) {
+    private func probeBlockKwp(_ e: Elm) throws -> (response: Response?, negativeResponse: Response?, state: BlockScanAttemptState, detail: String) {
         var observations: [String] = []
+        var negativeResponses: [Response] = []
         for service in ["1A91", "1A9B"] {
             let response = try e.request(service, timeout: 1.2)
             t("Проба KWP \(service): \(response)")
             observations.append("\(service): \(response)")
-            if response.ok { return (response, "\(service) → \(response)") }
+            if response.isPositive(0x1A) {
+                return (response, nil, .responded, "\(service) → \(response)")
+            }
+            if response.negative { negativeResponses.append(response) }
         }
 
         for service in ["1089", "1086", "1003"] {
             let session = try e.request(service, timeout: 1.5)
             t("Проба KWP-сеанса \(service): \(session)")
             observations.append("\(service): \(session)")
-            guard session.ok else { continue }
-            if session.isPositive(0x10) {
-                for identifier in ["1A91", "1A9B"] {
-                    let afterSession = try e.request(identifier, timeout: 1.2)
-                    t("Повтор KWP \(identifier) после сеанса \(service): \(afterSession)")
-                    if afterSession.ok {
-                        return (afterSession, "сеанс \(service); \(identifier) → \(afterSession)")
-                    }
+            guard session.isPositive(0x10) else {
+                if session.negative { negativeResponses.append(session) }
+                continue
+            }
+            for identifier in ["1A91", "1A9B"] {
+                let afterSession = try e.request(identifier, timeout: 1.2)
+                t("Повтор KWP \(identifier) после сеанса \(service): \(afterSession)")
+                observations.append("после \(service), \(identifier): \(afterSession)")
+                if afterSession.isPositive(0x1A) {
+                    return (afterSession, nil, .responded, "сеанс \(service); \(identifier) → \(afterSession)")
+                }
+                if afterSession.negative { negativeResponses.append(afterSession) }
+            }
+            return (session, nil, .responded, "положительный ответ на сеанс \(service) → \(session); идентификатор блока не получен")
+        }
+        if let lastNegative = negativeResponses.last {
+            return (nil, lastNegative, .negativeResponse, "ECU ответил отрицательно; проверочные сервисы не приняты: \(observations.joined(separator: "; "))")
+        }
+        return (nil, nil, .noResponse, observations.joined(separator: "; "))
+    }
+
+    /// Repeat the exact engine link fallback used by the main screen, but keep scanner state isolated.
+    private func probeMainEngineConnection(_ e: Elm, _ s: Settings) throws -> BlockScanAttempt {
+        var links = [Link(proto: s.proto, initAddress: s.initAddress, header: s.header)]
+        for link in [Link(proto: "5", initAddress: "", header: "8110F1"), Link(proto: "5", initAddress: "", header: "8101F1")]
+        where !links.contains(where: { $0.proto == link.proto && $0.header == link.header }) {
+            links.append(link)
+        }
+        var failures: [String] = []
+        for link in links {
+            t("Сценарий главного экрана двигателя: \(link.label), заголовок \(link.header)")
+            try e.prepareKwpMode()
+            _ = try e.cmd("ATSP\(link.proto)")
+            if link.proto == "3" || link.proto == "4" { _ = try e.cmd("ATIIA\(link.initAddress)") }
+            _ = try e.cmd("ATSH\(link.header)")
+            _ = try e.cmd("ATWM\(link.header)3E")
+            let (session, reason) = try startSession(e, s)
+            guard let session else {
+                failures.append("\(link.label): \(reason)")
+                continue
+            }
+
+            var software = "не предоставлен"
+            for identifier in ["1A9B", "1A91"] {
+                let response = try e.request(identifier, timeout: 2)
+                t("Идентификация двигателя \(identifier): \(response)")
+                if response.isPositive(0x1A), response.bytes.count > 2 {
+                    software = Dtc.identificationText(Array(response.bytes.dropFirst(2)))
+                    break
                 }
             }
-            return (session, "ответ на сеанс \(service) → \(session)")
+            return BlockScanAttempt(
+                mode: "Сценарий главного экрана · подключение двигателя",
+                state: .responded,
+                detail: "Соединение двигателя подтверждено: \(link.label), сеанс \(session); ПО: \(software)"
+            )
         }
-        return (nil, observations.joined(separator: "; "))
+        return BlockScanAttempt(
+            mode: "Сценарий главного экрана · подключение двигателя",
+            state: .noResponse,
+            detail: failures.joined(separator: "; ")
+        )
     }
 
     private func moduleConnectionFail(_ module: DtcModule, _ message: String) {
@@ -807,13 +866,14 @@ final class Me7Link: ObservableObject {
             self.t("стирание: \(r)")
             let outcome = self.clearAckOutcome(r)
             self.t("результат команды очистки: \(outcome.detail)")
-            if !outcome.acknowledged {
+            if !outcome.acknowledged && !outcome.pending {
                 self.dtcFail(outcome.detail)
                 self.flushTraceFile()
                 return
             }
+            self.waitForPendingClearVerification(outcome, module: .engine)
             guard let remaining = try self.readDtcOnWorker(e, module: .engine) else { return }
-            self.applyClearVerification(.engine, before: before, remaining: remaining)
+            self.applyClearVerification(.engine, before: before, remaining: remaining, outcome: outcome)
         }
     }
 
@@ -853,13 +913,14 @@ final class Me7Link: ObservableObject {
             self.t("ответ блока на стирание: \(response)")
             let outcome = self.clearAckOutcome(response)
             self.t("результат команды очистки: \(outcome.detail)")
-            guard outcome.acknowledged else {
+            guard outcome.acknowledged || outcome.pending else {
                 self.moduleDtcFail(module, outcome.detail)
                 self.flushTraceFile()
                 return
             }
+            self.waitForPendingClearVerification(outcome, module: module)
             guard let remaining = try self.readDtcOnWorker(e, module: module) else { return }
-            self.applyClearVerification(module, before: before, remaining: remaining)
+            self.applyClearVerification(module, before: before, remaining: remaining, outcome: outcome)
         }
     }
 
@@ -877,6 +938,8 @@ final class Me7Link: ObservableObject {
                 }
                 var cleared: [String] = []
                 var acceptedWithRemaining: [String] = []
+                var pendingVerified: [String] = []
+                var pendingRemaining: [String] = []
                 var acceptedCount = 0
                 var failed: [String] = []
                 for module in DtcModule.allCases {
@@ -895,20 +958,24 @@ final class Me7Link: ObservableObject {
                         self.t("ответ блока на очистку \(module.title): \(clearResponse)")
                         let outcome = self.clearAckOutcome(clearResponse)
                         self.t("результат команды очистки \(module.title): \(outcome.detail)")
-                        guard outcome.acknowledged else {
+                        guard outcome.acknowledged || outcome.pending else {
                             self.moduleDtcFail(module, outcome.detail)
                             failed.append("\(module.title): \(outcome.detail)")
                             continue
                         }
-                        acceptedCount += 1
+                        if outcome.acknowledged { acceptedCount += 1 }
+                        self.waitForPendingClearVerification(outcome, module: module)
                         self.setClearAll(.busy, "\(module.title): проверка результата…")
                         guard let remaining = try self.readDtcOnWorker(e, module: module) else {
                             failed.append("\(module.title): команда принята, но результат не удалось проверить")
                             continue
                         }
-                        let verification = self.applyClearVerification(module, before: before, remaining: remaining)
+                        let verification = self.applyClearVerification(module, before: before, remaining: remaining, outcome: outcome)
                         if remaining.isEmpty {
                             cleared.append(module.title)
+                            if outcome.pending { pendingVerified.append(module.title) }
+                        } else if outcome.pending {
+                            pendingRemaining.append("\(module.title): \(verification)")
                         } else {
                             acceptedWithRemaining.append("\(module.title): \(verification)")
                         }
@@ -920,15 +987,21 @@ final class Me7Link: ObservableObject {
                     }
                 }
 
-                var summary = "Команда очистки подтверждена для \(acceptedCount) блоков; без ошибок после проверки: \(cleared.count)."
+                var summary = "Положительный ответ на очистку получен для \(acceptedCount) блоков; без ошибок после проверки: \(cleared.count)."
                 if !cleared.isEmpty { summary += "\nОшибок нет: \(cleared.joined(separator: ", "))." }
+                if !pendingVerified.isEmpty {
+                    summary += "\nБлоки ответили только «обработка», но повторное чтение подтвердило пустой список: \(pendingVerified.joined(separator: ", "))."
+                }
+                if !pendingRemaining.isEmpty {
+                    summary += "\nНет итогового подтверждения, ошибки остались после повторного чтения: \(pendingRemaining.joined(separator: "; "))."
+                }
                 if !acceptedWithRemaining.isEmpty {
                     summary += "\nКоманда принята, но коды остались или сразу появились снова: \(acceptedWithRemaining.joined(separator: "; "))."
                 }
                 if !failed.isEmpty { summary += "\nНе удалось выполнить или проверить: \(failed.joined(separator: "; "))." }
                 self.t("Очистка ошибок во всех блоках завершена: \(summary.replacingOccurrences(of: "\n", with: " "))")
                 self.flushTraceFile()
-                self.setClearAll(failed.isEmpty ? .ok : .fail, summary)
+                self.setClearAll(failed.isEmpty && pendingRemaining.isEmpty ? .ok : .fail, summary)
             } catch ElmError.closed {
                 self.setClearAll(.fail, "Остановлено: соединение с адаптером потеряно")
                 throw ElmError.closed
@@ -947,9 +1020,9 @@ final class Me7Link: ObservableObject {
         return codes
     }
 
-    /// A KWP clear command can first return one or more 7F 14 78 (response pending)
-    /// frames and then the actual 54 FF 00 acknowledgement in the same ELM exchange.
-    private func clearAckOutcome(_ response: Response) -> (acknowledged: Bool, detail: String) {
+    /// A KWP clear command may return 7F 14 78 without the final acknowledgement;
+    /// callers then verify the actual DTC list before reporting the outcome.
+    private func clearAckOutcome(_ response: Response) -> (acknowledged: Bool, pending: Bool, detail: String) {
         let bytes = response.bytes
         var pendingCount = 0
         var finalNegative: Int?
@@ -964,24 +1037,53 @@ final class Me7Link: ObservableObject {
         }
         if acknowledged {
             let pending = pendingCount > 0 ? "; перед ним блок отложил ответ (7F 14 78 ×\(pendingCount))" : ""
-            return (true, "подтверждено положительным ответом 54 FF 00\(pending)")
+            return (true, false, "подтверждено положительным ответом 54 FF 00\(pending)")
         }
         if let code = finalNegative {
-            return (false, "блок отказал: 7F 14 \(hx(code))")
+            return (false, false, "блок отказал: 7F 14 \(hx(code))")
         }
         if pendingCount > 0 {
-            return (false, "блок сообщил только 7F 14 78 (обработка ещё не подтверждена); итогового ответа нет")
+            return (false, true, "блок сообщил только 7F 14 78 (обработка ещё не подтверждена); итогового ответа нет")
         }
-        return (false, "нет положительного подтверждения от блока (\(response))")
+        return (false, false, "нет положительного подтверждения от блока (\(response))")
+    }
+
+    private func waitForPendingClearVerification(
+        _ outcome: (acknowledged: Bool, pending: Bool, detail: String),
+        module: DtcModule
+    ) {
+        guard outcome.pending else { return }
+        t("\(module.title): \(outcome.detail); жду 3 секунды и затем перепроверяю ошибки")
+        Thread.sleep(forTimeInterval: 3)
     }
 
     @discardableResult
-    private func applyClearVerification(_ module: DtcModule, before: [DtcEntry]?, remaining: [DtcEntry]) -> String {
+    private func applyClearVerification(
+        _ module: DtcModule,
+        before: [DtcEntry]?,
+        remaining: [DtcEntry],
+        outcome: (acknowledged: Bool, pending: Bool, detail: String)
+    ) -> String {
         let summary: String
-        if remaining.isEmpty {
+        let beforeWords = Set(before?.map(\.rawWord) ?? [])
+        let remainingWords = Set(remaining.map(\.rawWord))
+        if outcome.pending && remaining.isEmpty {
+            summary = "\(outcome.detail); повторное чтение подтвердило, что ошибок нет."
+        } else if outcome.pending && before != nil && beforeWords != remainingWords {
+            let codes = remaining.map(\.code).joined(separator: ", ")
+            let removed = (before ?? []).filter { !remainingWords.contains($0.rawWord) }.map(\.code)
+            let added = remaining.filter { !beforeWords.contains($0.rawWord) }.map(\.code)
+            var changes: [String] = []
+            if !removed.isEmpty { changes.append("исчезли: \(removed.joined(separator: ", "))") }
+            if !added.isEmpty { changes.append("появились новые: \(added.joined(separator: ", "))") }
+            let changesText = changes.isEmpty ? "список изменился" : changes.joined(separator: "; ")
+            summary = "\(outcome.detail); после ожидания список изменился (\(changesText)), остались: \(codes)."
+        } else if outcome.pending {
+            let codes = remaining.map(\.code).joined(separator: ", ")
+            summary = "\(outcome.detail); после повторного чтения ошибки остаются: \(codes)."
+        } else if remaining.isEmpty {
             summary = "Команда очистки подтверждена; после проверки ошибок нет."
         } else {
-            let beforeWords = Set(before?.map(\.rawWord) ?? [])
             let codes = remaining.map(\.code).joined(separator: ", ")
             let alreadyPresent = remaining.filter { beforeWords.contains($0.rawWord) }.map(\.code)
             let firstObserved = remaining.filter { !beforeWords.contains($0.rawWord) }.map(\.code)
