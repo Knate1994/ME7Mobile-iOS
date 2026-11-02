@@ -20,6 +20,23 @@ struct LiveValue: Identifiable {
     let unit: String
 }
 
+private struct MAFPairReading {
+    let response: Response
+
+    var isPositive: Bool { response.bytes.count >= 7 && response.bytes[0] == 0x41 && response.bytes[1] == 0x66 }
+    var supportsA: Bool { isPositive && (response.bytes[2] & 0x01) != 0 }
+    var supportsB: Bool { isPositive && (response.bytes[2] & 0x02) != 0 }
+    var flowA: Double? {
+        guard supportsA else { return nil }
+        return Double((response.bytes[3] << 8) | response.bytes[4]) / 32.0
+    }
+    var flowB: Double? {
+        guard supportsB else { return nil }
+        return Double((response.bytes[5] << 8) | response.bytes[6]) / 32.0
+    }
+    var supportsAny: Bool { supportsA || supportsB }
+}
+
 /// ATAL: K-line messages longer than 7 data bytes (0x21 block, DTC list).
 private let baseSetup = ["ATE0", "ATL0", "ATS0", "ATH0", "ATAL", "ATAT1", "ATST64", "ATKW0"]
 
@@ -49,6 +66,8 @@ final class Me7Link: ObservableObject {
     @Published var traceFileURL: URL?
     @Published var logging = false
     @Published var logText = ""
+    @Published var mafProbeState = LinkState.idle
+    @Published var mafProbeText = "Проверка ещё не запускалась"
     @Published var live: [LiveValue] = []
     @Published var hz = 0.0
     @Published var trace: [String] = []
@@ -1139,7 +1158,49 @@ final class Me7Link: ObservableObject {
 
     func stopLog() { running = false }
 
-    func startLog(_ s: Settings, _ wanted: [Measurement]) {
+    func probeMafPair() {
+        guard !logging else { return }
+        ui { self.mafProbeState = .busy; self.mafProbeText = "Проверка поддержки PID 01 66…" }
+        job({ msg in
+            self.t("ОШИБКА ПРОВЕРКИ ДМРВ A/B: \(msg)")
+            self.ui { self.mafProbeState = .fail; self.mafProbeText = "Проверка не удалась: \(msg)" }
+        }) {
+            guard let e = self.elm, self.ecuOk, self.activeModule == .engine else {
+                self.ui { self.mafProbeState = .fail; self.mafProbeText = "Сначала подключи ЭБУ двигателя" }
+                return
+            }
+            self.t("=== проверка двух ДМРВ · OBD PID 01 66 ===")
+            let reading = try self.readMafPair(e)
+            self.publishMafProbe(reading)
+        }
+    }
+
+    private func readMafPair(_ e: Elm) throws -> MAFPairReading {
+        MAFPairReading(response: try e.request("0166", timeout: 1.5))
+    }
+
+    private func publishMafProbe(_ reading: MAFPairReading) {
+        let response = reading.response.description.isEmpty ? "пустой ответ" : reading.response.description
+        guard reading.isPositive else {
+            let text = "ЭБУ не подтвердил PID 01 66: \(response)"
+            t(text)
+            ui { self.mafProbeState = .fail; self.mafProbeText = text }
+            return
+        }
+        guard reading.supportsAny else {
+            let text = "PID 01 66 ответил, но ЭБУ не отметил поддержку ДМРВ A или B (\(response))"
+            t(text)
+            ui { self.mafProbeState = .fail; self.mafProbeText = text }
+            return
+        }
+        let a = reading.supportsA ? String(format: "%.2f г/с", reading.flowA ?? 0) : "не поддерживается"
+        let b = reading.supportsB ? String(format: "%.2f г/с", reading.flowB ?? 0) : "не поддерживается"
+        let text = "Расход: ДМРВ A — \(a); ДМРВ B — \(b)"
+        t("PID 01 66: \(text); ответ \(response)")
+        ui { self.mafProbeState = .ok; self.mafProbeText = text }
+    }
+
+    func startLog(_ s: Settings, _ wanted: [Measurement], includeMafPair: Bool = false) {
         running = true
         setLog(true, "Запуск…")
         job({ msg in self.ecuFail(msg); self.running = false; self.setLog(false, "ошибка: \(msg)") }) {
@@ -1147,6 +1208,19 @@ final class Me7Link: ObservableObject {
                 self.running = false
                 self.setLog(false, "сначала подключи ЭБУ")
                 return
+            }
+            var mafPairAvailable = false
+            if includeMafPair {
+                self.ui { self.mafProbeState = .busy; self.mafProbeText = "Проверка PID 01 66 перед записью…" }
+                do {
+                    let reading = try self.readMafPair(e)
+                    self.publishMafProbe(reading)
+                    mafPairAvailable = reading.isPositive && reading.supportsAny
+                } catch {
+                    let text = "Не удалось прочитать PID 01 66: \(error)"
+                    self.t(text)
+                    self.ui { self.mafProbeState = .fail; self.mafProbeText = text }
+                }
             }
             self.setLog(true, "Определение переменных (0x2C)…")
             let plan = try self.defineVariables(e, s, wanted)
@@ -1158,7 +1232,7 @@ final class Me7Link: ObservableObject {
                 self.setLog(false, "ЭБУ принял \(plan.variables.count) из \(wanted.count) переменных; см. журнал")
                 return
             }
-            try self.logLoop(e, plan)
+            try self.logLoop(e, plan, includeMafPair: mafPairAvailable)
         }
     }
 
@@ -1307,7 +1381,7 @@ final class Me7Link: ObservableObject {
         return ReadPlan(variables: variables, groups: [], offsets: offsets, mode: .rmba)
     }
 
-    private func logLoop(_ e: Elm, _ plan: ReadPlan) throws {
+    private func logLoop(_ e: Elm, _ plan: ReadPlan, includeMafPair: Bool) throws {
         let vars = plan.variables
         let st = stamp()
         let csv = openOutput("me7_\(st).csv")
@@ -1321,14 +1395,17 @@ final class Me7Link: ObservableObject {
         var extraUnits: [String] = []
         if hasActualBoost { extraNames.append("boost_actual_gauge"); extraUnits.append("mbar(g)") }
         if hasRequestedBoost { extraNames.append("boost_target_gauge"); extraUnits.append("mbar(g)") }
-        w("TimeStamp," + (vars.map { $0.name } + extraNames).joined(separator: ",") + "\n")
-        w("s," + (vars.map { $0.displayUnit } + extraUnits).joined(separator: ",") + "\n")
+        let mafNames = includeMafPair ? ["maf_a_obd_g_s", "maf_b_obd_g_s"] : []
+        let mafUnits = includeMafPair ? ["g/s", "g/s"] : []
+        w("TimeStamp," + (vars.map { $0.name } + extraNames + mafNames).joined(separator: ",") + "\n")
+        w("s," + (vars.map { $0.displayUnit } + extraUnits + mafUnits).joined(separator: ",") + "\n")
         let modeText: String
         switch plan.mode {
         case .ddli: modeText = "DDLI · \(plan.groups.count) блока"
         case .rmba: modeText = "RMBA"
         }
-        setLog(true, "Запись: \(vars.count) перем., режим \(modeText) → ME7Logs/me7_\(st).csv")
+        let mafText = includeMafPair ? ", два расхода ДМРВ PID 01 66" : ""
+        setLog(true, "Запись: \(vars.count) перем., режим \(modeText)\(mafText) → ME7Logs/me7_\(st).csv")
         var values = [Double](repeating: 0, count: vars.count)
         let t0 = Date()
         var samples = 0
@@ -1337,6 +1414,7 @@ final class Me7Link: ObservableObject {
         var hzT = Date()
         var hzN = 0
         var hz = 0.0
+        var mafReadFailures = 0
         var reason = "остановлено, записано"
         defer {
             running = false
@@ -1403,19 +1481,47 @@ final class Me7Link: ObservableObject {
                 continue
             }
 
-            var outputValues = values
+            var mafReading: MAFPairReading?
+            if includeMafPair {
+                do {
+                    mafReading = try self.readMafPair(e)
+                    if mafReading?.isPositive == true { mafReadFailures = 0 }
+                    else {
+                        mafReadFailures += 1
+                        if mafReadFailures == 1 || mafReadFailures % 20 == 0 {
+                            t("PID 01 66: нет положительного ответа (\(mafReading?.response.description ?? "нет ответа")); основная запись продолжается")
+                        }
+                    }
+                } catch {
+                    mafReading = nil
+                    mafReadFailures += 1
+                    if mafReadFailures == 1 || mafReadFailures % 20 == 0 {
+                        t("PID 01 66: \(error); основная запись продолжается")
+                    }
+                }
+            }
+
+            var outputFields = values.map(fmt)
             var derivedLive: [LiveValue] = []
             if let actualPressure, let ambientPressure {
                 let value = values[actualPressure] - values[ambientPressure]
-                outputValues.append(value)
+                outputFields.append(fmt(value))
                 derivedLive.append(LiveValue(id: "boost_actual_gauge", label: "Наддув фактический · избыточный", value: value, unit: "mbar"))
             }
             if let requestedPressure, let ambientPressure {
                 let value = values[requestedPressure] - values[ambientPressure]
-                outputValues.append(value)
+                outputFields.append(fmt(value))
                 derivedLive.append(LiveValue(id: "boost_target_gauge", label: "Наддув заданный · избыточный", value: value, unit: "mbar"))
             }
-            w(String(format: "%.3f", Date().timeIntervalSince(t0)) + outputValues.map { "," + fmt($0) }.joined() + "\n")
+            if includeMafPair {
+                let a = mafReading?.flowA
+                let b = mafReading?.flowB
+                outputFields.append(a.map(fmt) ?? "")
+                outputFields.append(b.map(fmt) ?? "")
+                if let a { derivedLive.append(LiveValue(id: "maf_a_obd_g_s", label: "ДМРВ A · расход по OBD", value: a, unit: "г/с")) }
+                if let b { derivedLive.append(LiveValue(id: "maf_b_obd_g_s", label: "ДМРВ B · расход по OBD", value: b, unit: "г/с")) }
+            }
+            w(String(format: "%.3f", Date().timeIntervalSince(t0)) + "," + outputFields.joined(separator: ",") + "\n")
             samples += 1
             hzN += 1
             let now = Date()

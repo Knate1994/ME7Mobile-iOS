@@ -13,6 +13,7 @@ struct LoggingScreen: View {
     @Binding var showVars: Bool
     let makeSettings: () -> Settings
     let applyPreset: ([String]) -> Void
+    @AppStorage("me7.logMafPair") private var includeMafPair = false
     @State private var showTrace = false
     @AppStorage("me7.customVariablePresets") private var customPresetsJSON = "[]"
     @State private var showSavePreset = false
@@ -121,7 +122,7 @@ struct LoggingScreen: View {
                         .disabled(link.logging)
                     }
                     Button {
-                        if link.logging { link.stopLog() } else { link.startLog(makeSettings(), selected) }
+                        if link.logging { link.stopLog() } else { link.startLog(makeSettings(), selected, includeMafPair: includeMafPair) }
                     } label: {
                         Label(link.logging ? "Остановить запись" : "Начать запись", systemImage: link.logging ? "stop.fill" : "record.circle")
                             .font(.system(size: 16, weight: .bold))
@@ -131,6 +132,32 @@ struct LoggingScreen: View {
                     .buttonStyle(.borderedProminent)
                     .tint(link.logging ? .red : .green)
                     .disabled(!(link.logging || link.ecuState == .ok) || link.dtcState == .busy || (!link.logging && selected.isEmpty))
+                }
+
+                panel {
+                    heading("Два ДМРВ", detail: "Раздельный расход через стандартный PID 01 66", symbol: "wind")
+                    Toggle("Добавлять расход ДМРВ A/B в запись", isOn: $includeMafPair)
+                        .tint(.cyan)
+                        .disabled(link.logging)
+                    Button {
+                        link.probeMafPair()
+                    } label: {
+                        Label("Проверить поддержку двух ДМРВ", systemImage: "waveform.path.ecg")
+                            .font(.system(size: 14, weight: .semibold))
+                            .frame(maxWidth: .infinity)
+                            .frame(minHeight: 42)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.cyan)
+                    .disabled(link.ecuState != .ok || link.logging || link.mafProbeState == .busy)
+                    Text(link.mafProbeText)
+                        .font(.footnote)
+                        .foregroundStyle(link.mafProbeState == .ok ? Color.green : link.mafProbeState == .fail ? Color.red : Color.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("При поддержке PID оба расхода будут отдельными колонками CSV и показаниями. Второе напряжение ДМРВ пока не описано в точной карте этой прошивки; для него нужен проверенный канал именно для 8TE2ASN3000 0045.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 panel {
