@@ -407,7 +407,7 @@ final class Me7Link: ObservableObject {
         let target = module.target
         let links = [
             Link(proto: "5", initAddress: "", header: "81\(target)F1"),
-            Link(proto: "4", initAddress: target, header: "C1\(target)F1"),
+            Link(proto: "4", initAddress: target, header: "81\(target)F1"),
         ]
         var failures: [String] = []
         for link in links {
@@ -593,7 +593,7 @@ final class Me7Link: ObservableObject {
                     try e.prepareKwpMode()
                     _ = try e.cmd("ATSP4")
                     _ = try e.cmd("ATIIA\(target.addressText)")
-                    let header = "C1\(target.addressText)F1"
+                    let header = "81\(target.addressText)F1"
                     _ = try e.cmd("ATSH\(header)")
                     _ = try e.cmd("ATWM\(header)3E")
                     let probe = try self.probeBlockKwp(e)
