@@ -78,63 +78,69 @@ struct ModuleDiagnostic {
 struct BlockScanTarget: Identifiable, Hashable {
     let address: Int
     let title: String
+    /// Physical KWP fast-init targets used by some ECUs for this logical module.
+    let fastInitTargets: [Int]
+    /// Whether this module is documented/reasonable to probe with VW TP 1.6 on this car.
+    let supportsTP16: Bool
+
+    init(address: Int, title: String, fastInitTargets: [Int]? = nil, supportsTP16: Bool = false) {
+        self.address = address
+        self.title = title
+        self.fastInitTargets = fastInitTargets ?? [address]
+        self.supportsTP16 = supportsTP16
+    }
+
     var id: Int { address }
     var addressText: String { String(format: "%02X", address) }
 
+    /// Curated from the Touareg 7L scan profile, with the two address aliases confirmed
+    /// by the supplied Cayenne traces and the Cayenne MOST gateway added separately.
     static let cayenne955: [BlockScanTarget] = [
-        .init(address: 0x01, title: "Двигатель"),
+        .init(address: 0x01, title: "Двигатель", fastInitTargets: [0x10, 0x01]),
         .init(address: 0x02, title: "АКПП Tiptronic"),
-        .init(address: 0x03, title: "ABS / ESP (PSM)"),
-        .init(address: 0x05, title: "KESSY / доступ и запуск"),
+        .init(address: 0x03, title: "ABS / ESP (PSM)", supportsTP16: true),
+        .init(address: 0x05, title: "KESSY · доступ и запуск"),
         .init(address: 0x06, title: "Память пассажирского сиденья"),
-        .init(address: 0x07, title: "PCM / передний инфоблок"),
         .init(address: 0x08, title: "Климат-контроль"),
-        .init(address: 0x09, title: "Центральная электрика (VES)"),
-        .init(address: 0x10, title: "Неоднозначный fast-init адрес · ЭБУ / ParkAssist"),
-        .init(address: 0x14, title: "Подвеска · вариант адреса"),
+        .init(address: 0x09, title: "Бортовая электрика"),
+        .init(address: 0x11, title: "Круиз-контроль · дополнительный ЭБУ"),
+        .init(address: 0x13, title: "Контроль дистанции"),
         .init(address: 0x15, title: "Airbag / SRS"),
         .init(address: 0x16, title: "Электроника рулевой колонки"),
-        .init(address: 0x17, title: "Приборная панель"),
+        .init(address: 0x17, title: "Приборная панель", fastInitTargets: [0x61, 0x17]),
         .init(address: 0x18, title: "Дополнительный отопитель"),
         .init(address: 0x19, title: "CAN-шлюз"),
-        .init(address: 0x20, title: "Дальний свет / ассистент света"),
+        .init(address: 0x1C, title: "Датчик положения автомобиля"),
         .init(address: 0x22, title: "Раздаточная коробка / AWD"),
-        .init(address: 0x25, title: "Иммобилайзер · вариант KESSY"),
-        .init(address: 0x26, title: "Панорамная крыша"),
         .init(address: 0x29, title: "Левая фара"),
-        .init(address: 0x31, title: "Диагностический интерфейс / шлюз"),
-        .init(address: 0x34, title: "Пневмоподвеска / уровень"),
-        .init(address: 0x35, title: "Центральный замок"),
+        .init(address: 0x32, title: "Блокировка дифференциала"),
+        .init(address: 0x34, title: "Пневмоподвеска / регулировка уровня", supportsTP16: true),
         .init(address: 0x36, title: "Память водительского сиденья"),
         .init(address: 0x37, title: "Навигация / PCM"),
         .init(address: 0x39, title: "Правая фара"),
-        .init(address: 0x42, title: "Дверь водителя"),
-        .init(address: 0x44, title: "Усилитель руля"),
-        .init(address: 0x45, title: "Контроль салона / наклона"),
+        .init(address: 0x3C, title: "Ассистент перестроения"),
         .init(address: 0x46, title: "Комфорт / центральный замок"),
         .init(address: 0x47, title: "Усилитель аудиосистемы"),
-        .init(address: 0x52, title: "Дверь пассажира"),
-        .init(address: 0x53, title: "Стояночный тормоз"),
-        .init(address: 0x55, title: "Управление фарами"),
-        .init(address: 0x56, title: "Радио / PCM"),
+        .init(address: 0x55, title: "Корректор фар"),
+        .init(address: 0x56, title: "Радио"),
         .init(address: 0x57, title: "ТВ-тюнер"),
-        .init(address: 0x61, title: "Электропитание / аккумулятор"),
-        .init(address: 0x62, title: "Задняя левая дверь"),
-        .init(address: 0x64, title: "Активные стабилизаторы"),
+        .init(address: 0x64, title: "Датчик угла поворота руля"),
         .init(address: 0x65, title: "Контроль давления шин"),
-        .init(address: 0x66, title: "Память заднего сиденья"),
         .init(address: 0x68, title: "Стеклоочистители"),
         .init(address: 0x69, title: "Фаркоп / прицеп"),
+        .init(address: 0x6C, title: "Камера заднего вида"),
         .init(address: 0x6D, title: "Электропривод задней двери"),
-        .init(address: 0x72, title: "Задняя правая дверь"),
+        .init(address: 0x6E, title: "Память пассажирского сиденья"),
+        .init(address: 0x75, title: "Телематика"),
         .init(address: 0x76, title: "Парктроники ParkAssist"),
         .init(address: 0x77, title: "Телефон"),
-        .init(address: 0x82, title: "MOST-шлюз"),
+        .init(address: 0x82, title: "MOST-шлюз · Cayenne"),
     ]
 }
 
 enum BlockScanAttemptState: Equatable {
     case responded
+    case unverifiedResponse
     case negativeResponse
     case channelOnly
     case noResponse
@@ -152,6 +158,7 @@ struct BlockScanResult: Identifiable, Equatable {
     var attempts: [BlockScanAttempt] = []
     var id: Int { target.address }
     var responded: Bool { attempts.contains { $0.state == .responded } }
+    var hasUnverifiedResponse: Bool { attempts.contains { $0.state == .unverifiedResponse } }
     var receivedNegativeResponse: Bool { attempts.contains { $0.state == .negativeResponse } }
     var transportOpened: Bool { attempts.contains { $0.state == .channelOnly } }
 }

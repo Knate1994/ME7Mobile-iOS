@@ -186,6 +186,38 @@ final class Elm {
         return Response(bytes: bytes, errors: errors)
     }
 
+    /// Block-scan-only variant that keeps each ELM response line separate. Some ECUs
+    /// first return KWP NRC 0x78 (response pending), then the actual positive answer;
+    /// combining those lines makes the pending response hide the positive one.
+    func requestFramesForBlockScan(_ hex: String, timeout: Double = 3) throws -> [Response] {
+        if tp20Channel != nil || tp16Channel != nil {
+            return [try request(hex, timeout: timeout)]
+        }
+        let text = try cmd(hex, timeout: timeout)
+        var frames: [Response] = []
+        for line in text.split(separator: "\n").map(String.init) {
+            let upper = line.uppercased()
+            if upper.hasPrefix("BUS INIT") || upper.hasPrefix("SEARCHING") || upper == "OK" { continue }
+            if let bytes = hexBytes(line) {
+                frames.append(Response(bytes: bytes, errors: []))
+            } else {
+                frames.append(Response(bytes: [], errors: [line]))
+            }
+        }
+        return frames
+    }
+
+    /// Test Blocks uses this setup to avoid sending ATCRA, which many ELM clones
+    /// reject and which is not needed for K-Line KWP requests.
+    func prepareBlockScanKwpMode() throws {
+        tp16Channel = nil
+        tp20Channel = nil
+        _ = try cmd("ATPC")
+        for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATST64"] {
+            _ = try cmd(command)
+        }
+    }
+
     /// Opens VW TP 1.6 over the ELM327's user-defined 11-bit, variable-DLC CAN mode.
     /// Target is the vehicle's diagnostic address (for example 0x03 for PSM).
     func connectTP16(target: Int, baudDivisor: Int = 1) throws -> (connected: Bool, reason: String) {

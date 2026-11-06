@@ -503,12 +503,16 @@ final class Me7Link: ObservableObject {
     func scanAllBlocks(_ s: Settings, bridgeState: String) {
         guard beginBlockScan() else { return }
         setBlockScanBridgeState(bridgeState)
+        let targets = BlockScanTarget.cayenne955
+        let plannedChecks = targets.reduce(1) { count, target in
+            count + target.fastInitTargets.count + 1 + (target.supportsTP16 ? 1 : 0)
+        }
         ui {
             self.blockScanState = .busy
-            self.blockScanStatus = "Подготовка полного опроса…"
+            self.blockScanStatus = "Подготовка опроса по профилю Touareg 7L…"
             self.blockScanProgress = 0
-            self.blockScanTotal = BlockScanTarget.cayenne955.count * 6 + 1
-            self.blockScanResults = BlockScanTarget.cayenne955.map { BlockScanResult(target: $0) }
+            self.blockScanTotal = plannedChecks
+            self.blockScanResults = targets.map { BlockScanResult(target: $0) }
         }
         job({ message in
             self.ui {
@@ -517,7 +521,7 @@ final class Me7Link: ObservableObject {
             }
         }) {
             defer { self.endBlockScan() }
-            self.t("=== ПОЛНЫЙ ОПРОС БЛОКОВ Cayenne 955 ===")
+            self.t("=== ТЕСТ БЛОКОВ · профиль адресов Touareg 7L / проверяемый автомобиль Cayenne 955 ===")
             self.t("ELM: \(s.host):\(s.port)")
             self.t("Перемычка OBD 3–7 по отметке пользователя: \(bridgeState)")
             guard let e = self.elm else {
@@ -535,13 +539,12 @@ final class Me7Link: ObservableObject {
             self.setEcu(.idle, "Выполняется полный опрос блоков")
             e.disconnectTP16()
 
-            let targets = BlockScanTarget.cayenne955
-            let total = targets.count * 6 + 1
+            let total = plannedChecks
             var progress = 0
             var results = targets.map { BlockScanResult(target: $0) }
             self.t("Кандидатов адресов: \(targets.count); проверок транспорта и сценариев подключения: \(total)")
             self.t("Адреса: \(targets.map { "0x\($0.addressText) \($0.title)" }.joined(separator: "; "))")
-            self.t("Проверки только читающие: KWP идентификация/сессия, TP1.6 и TP2.0. Очистка, кодирование и исполнительные тесты не выполняются.")
+            self.t("Проверки только читающие: KWP fast/slow init; TP1.6 500 кбит/с только для PSM и подвески. TP2.0 и CAN 250 не входят в профиль. Ошибки не стираются, кодирование и исполнительные тесты не запускаются.")
 
             for index in targets.indices {
                 if self.shouldStopBlockScan { break }
@@ -563,6 +566,7 @@ final class Me7Link: ObservableObject {
                     let stateText: String
                     switch attempt.state {
                     case .responded: stateText = "ОТВЕТИЛ"
+                    case .unverifiedResponse: stateText = "ОТВЕТИЛ, НО БЛОК НЕ ИДЕНТИФИЦИРОВАН"
                     case .negativeResponse: stateText = "ОТВЕТИЛ ОТКАЗОМ НА СЕРВИС"
                     case .channelOnly: stateText = "КАНАЛ ОТКРЫТ, KWP МОЛЧИТ"
                     case .noResponse: stateText = "НЕТ ОТВЕТА"
@@ -579,18 +583,22 @@ final class Me7Link: ObservableObject {
                     }
                 }
 
-                try record("KWP fast init · K-Line") {
-                    try e.prepareKwpMode()
-                    _ = try e.cmd("ATSP5")
-                    let header = "81\(target.addressText)F1"
-                    _ = try e.cmd("ATSH\(header)")
-                    _ = try e.cmd("ATWM\(header)3E")
-                    let probe = try self.probeBlockKwp(e)
-                    return BlockScanAttempt(mode: "KWP fast init · K-Line", state: probe.state, detail: probe.detail)
+                for physicalAddress in target.fastInitTargets {
+                    let physicalText = String(format: "%02X", physicalAddress)
+                    let mode = "KWP fast init · физический адрес 0x\(physicalText)"
+                    try record(mode) {
+                        try e.prepareBlockScanKwpMode()
+                        _ = try e.cmd("ATSP5")
+                        let header = "81\(physicalText)F1"
+                        _ = try e.cmd("ATSH\(header)")
+                        _ = try e.cmd("ATWM\(header)3E")
+                        let probe = try self.probeBlockKwp(e)
+                        return BlockScanAttempt(mode: mode, state: probe.state, detail: probe.detail)
+                    }
                 }
 
                 try record("KWP slow init · K-Line 5 бод") {
-                    try e.prepareKwpMode()
+                    try e.prepareBlockScanKwpMode()
                     _ = try e.cmd("ATSP4")
                     _ = try e.cmd("ATIIA\(target.addressText)")
                     let header = "81\(target.addressText)F1"
@@ -600,27 +608,14 @@ final class Me7Link: ObservableObject {
                     return BlockScanAttempt(mode: "KWP slow init · K-Line 5 бод", state: probe.state, detail: probe.detail)
                 }
 
-                for (name, divisor) in [("VW TP1.6 · CAN 500 кбит/с", 1), ("VW TP1.6 · CAN 250 кбит/с", 2)] {
+                if target.supportsTP16 {
+                    let name = "VW TP1.6 · CAN 500 кбит/с"
                     try record(name) {
-                        let setup = try e.connectTP16(target: target.address, baudDivisor: divisor)
+                        let setup = try e.connectTP16(target: target.address, baudDivisor: 1)
                         guard setup.connected else { return BlockScanAttempt(mode: name, state: .noResponse, detail: setup.reason) }
                         let probe = try self.probeBlockKwp(e)
                         e.disconnectTP16()
-                        if probe.state == .responded || probe.state == .negativeResponse {
-                            return BlockScanAttempt(mode: name, state: probe.state, detail: probe.detail)
-                        }
-                        return BlockScanAttempt(mode: name, state: .channelOnly,
-                                                detail: "транспортный канал открыт; диагностический KWP-ответ не получен (\(probe.detail))")
-                    }
-                }
-
-                for (name, divisor) in [("VW TP2.0 · CAN 500 кбит/с", 1), ("VW TP2.0 · CAN 250 кбит/с", 2)] {
-                    try record(name) {
-                        let setup = try e.connectTP20(target: target.address, baudDivisor: divisor)
-                        guard setup.connected else { return BlockScanAttempt(mode: name, state: .noResponse, detail: setup.reason) }
-                        let probe = try self.probeBlockKwp(e)
-                        e.disconnectTP16()
-                        if probe.state == .responded || probe.state == .negativeResponse {
+                        if probe.state == .responded || probe.state == .unverifiedResponse || probe.state == .negativeResponse {
                             return BlockScanAttempt(mode: name, state: probe.state, detail: probe.detail)
                         }
                         return BlockScanAttempt(mode: name, state: .channelOnly,
@@ -631,12 +626,13 @@ final class Me7Link: ObservableObject {
 
             e.disconnectTP16()
             let replied = results.filter(\.responded).count
-            let negative = results.filter { !$0.responded && $0.receivedNegativeResponse }.count
-            let channelOnly = results.filter { !$0.responded && !$0.receivedNegativeResponse && $0.transportOpened }.count
+            let unverified = results.filter { !$0.responded && $0.hasUnverifiedResponse }.count
+            let negative = results.filter { !$0.responded && !$0.hasUnverifiedResponse && $0.receivedNegativeResponse }.count
+            let channelOnly = results.filter { !$0.responded && !$0.hasUnverifiedResponse && !$0.receivedNegativeResponse && $0.transportOpened }.count
             let stopped = self.shouldStopBlockScan
             let summary = stopped
-                ? "Остановлено пользователем: \(progress)/\(total) проверок; положительно ответили \(replied), отказали в проверочном сервисе \(negative), открыли только канал \(channelOnly)."
-                : "Завершено: положительно ответили \(replied), отказали в проверочном сервисе \(negative), открыли только канал \(channelOnly)."
+                ? "Остановлено пользователем: \(progress)/\(total) проверок; блоки с ID \(replied), отклик без ID \(unverified), отказали в сервисе \(negative), открыт только канал \(channelOnly)."
+                : "Завершено: блоки с подтверждённым ID \(replied), отклик без ID \(unverified), отказали в сервисе \(negative), открыт только канал \(channelOnly)."
             self.t("=== ИТОГ ПОЛНОГО ОПРОСА ===")
             self.t(summary)
             self.ui {
@@ -661,37 +657,63 @@ final class Me7Link: ObservableObject {
     private func probeBlockKwp(_ e: Elm) throws -> (response: Response?, negativeResponse: Response?, state: BlockScanAttemptState, detail: String) {
         var observations: [String] = []
         var negativeResponses: [Response] = []
-        for service in ["1A91", "1A9B"] {
-            let response = try e.request(service, timeout: 1.2)
-            t("Проба KWP \(service): \(response)")
-            observations.append("\(service): \(response)")
-            if response.isPositive(0x1A) {
-                return (response, nil, .responded, "\(service) → \(response)")
+        var sawUnverifiedResponse = false
+
+        func readIdentity(_ identifier: String) throws -> String? {
+            let frames = try e.requestFramesForBlockScan(identifier, timeout: 1.2)
+            if frames.isEmpty { observations.append("\(identifier): нет ответа") }
+            for frame in frames {
+                t("Проба KWP \(identifier): \(frame)")
+                observations.append("\(identifier): \(frame)")
+                guard frame.isPositive(0x1A), frame.bytes.count > 2,
+                      frame.bytes[1] == (identifier == "1A9B" ? 0x9B : 0x91) else {
+                    if frame.negative, frame.bytes[2] != 0x78 { negativeResponses.append(frame) }
+                    continue
+                }
+                let identity = Dtc.identificationText(Array(frame.bytes.dropFirst(2)))
+                let generic = identity.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "HARDWARE NO"
+                    || identity == "Ответ пустой"
+                if generic {
+                    sawUnverifiedResponse = true
+                    observations.append("\(identifier): получен только общий Hardware No, номер блока не подтверждён")
+                } else {
+                    return "\(identifier) → \(identity)"
+                }
             }
-            if response.negative { negativeResponses.append(response) }
+            return nil
+        }
+
+        for service in ["1A91", "1A9B"] {
+            if let identity = try readIdentity(service) {
+                return (nil, nil, .responded, "Подтверждён идентификатор блока: \(identity)")
+            }
         }
 
         for service in ["1089", "1086", "1003"] {
-            let session = try e.request(service, timeout: 1.5)
-            t("Проба KWP-сеанса \(service): \(session)")
-            observations.append("\(service): \(session)")
-            guard session.isPositive(0x10) else {
-                if session.negative { negativeResponses.append(session) }
-                continue
-            }
-            for identifier in ["1A91", "1A9B"] {
-                let afterSession = try e.request(identifier, timeout: 1.2)
-                t("Повтор KWP \(identifier) после сеанса \(service): \(afterSession)")
-                observations.append("после \(service), \(identifier): \(afterSession)")
-                if afterSession.isPositive(0x1A) {
-                    return (afterSession, nil, .responded, "сеанс \(service); \(identifier) → \(afterSession)")
+            let frames = try e.requestFramesForBlockScan(service, timeout: 1.5)
+            if frames.isEmpty { observations.append("сеанс \(service): нет ответа") }
+            for session in frames {
+                t("Проба KWP-сеанса \(service): \(session)")
+                observations.append("сеанс \(service): \(session)")
+                guard session.isPositive(0x10) else {
+                    if session.negative, session.bytes[2] != 0x78 { negativeResponses.append(session) }
+                    continue
                 }
-                if afterSession.negative { negativeResponses.append(afterSession) }
+                sawUnverifiedResponse = true
+                for identifier in ["1A9B", "1A91"] {
+                    if let identity = try readIdentity(identifier) {
+                        return (nil, nil, .responded, "Сеанс \(service); подтверждён идентификатор блока: \(identity)")
+                    }
+                }
+                return (session, nil, .unverifiedResponse,
+                        "Блок принял диагностический сеанс \(service), но не выдал проверяемый номер; не считаю это подтверждённым блоком")
             }
-            return (session, nil, .responded, "положительный ответ на сеанс \(service) → \(session); идентификатор блока не получен")
         }
         if let lastNegative = negativeResponses.last {
             return (nil, lastNegative, .negativeResponse, "ECU ответил отрицательно; проверочные сервисы не приняты: \(observations.joined(separator: "; "))")
+        }
+        if sawUnverifiedResponse {
+            return (nil, nil, .unverifiedResponse, "ECU откликнулся, но номер блока не подтвердился: \(observations.joined(separator: "; "))")
         }
         return (nil, nil, .noResponse, observations.joined(separator: "; "))
     }
@@ -717,19 +739,27 @@ final class Me7Link: ObservableObject {
                 continue
             }
 
-            var software = "не предоставлен"
+            var software: String?
             for identifier in ["1A9B", "1A91"] {
-                let response = try e.request(identifier, timeout: 2)
-                t("Идентификация двигателя \(identifier): \(response)")
-                if response.isPositive(0x1A), response.bytes.count > 2 {
-                    software = Dtc.identificationText(Array(response.bytes.dropFirst(2)))
-                    break
+                let frames = try e.requestFramesForBlockScan(identifier, timeout: 2)
+                for response in frames {
+                    t("Идентификация двигателя \(identifier): \(response)")
+                    guard response.isPositive(0x1A), response.bytes.count > 2 else { continue }
+                    let value = Dtc.identificationText(Array(response.bytes.dropFirst(2)))
+                    if value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() != "HARDWARE NO",
+                       value != "Ответ пустой" {
+                        software = "\(identifier) · \(value)"
+                        break
+                    }
                 }
+                if software != nil { break }
             }
             return BlockScanAttempt(
                 mode: "Сценарий главного экрана · подключение двигателя",
-                state: .responded,
-                detail: "Соединение двигателя подтверждено: \(link.label), сеанс \(session); ПО: \(software)"
+                state: software == nil ? .unverifiedResponse : .responded,
+                detail: software.map {
+                    "Соединение двигателя подтверждено: \(link.label), сеанс \(session); идентификатор: \($0)"
+                } ?? "Двигатель принял сеанс по сценарию главного экрана (\(link.label)), но номер блока не получен"
             )
         }
         return BlockScanAttempt(

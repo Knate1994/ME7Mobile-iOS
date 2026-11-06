@@ -340,15 +340,17 @@ struct BlockScanView: View {
 
     private var scanning: Bool { link.blockScanState == .busy }
     private var answeredCount: Int { link.blockScanResults.filter(\.responded).count }
+    private var unverifiedCount: Int { link.blockScanResults.filter { !$0.responded && $0.hasUnverifiedResponse }.count }
     private var negativeResponseCount: Int {
-        link.blockScanResults.filter { !$0.responded && $0.receivedNegativeResponse }.count
+        link.blockScanResults.filter { !$0.responded && !$0.hasUnverifiedResponse && $0.receivedNegativeResponse }.count
     }
     private var channelOnlyCount: Int {
-        link.blockScanResults.filter { !$0.responded && !$0.receivedNegativeResponse && $0.transportOpened }.count
+        link.blockScanResults.filter { !$0.responded && !$0.hasUnverifiedResponse && !$0.receivedNegativeResponse && $0.transportOpened }.count
     }
     private var checkedWithoutAnswerCount: Int {
         link.blockScanResults.filter {
             !$0.responded && !$0.receivedNegativeResponse && !$0.transportOpened && !$0.attempts.isEmpty
+                && !$0.hasUnverifiedResponse
         }.count
     }
 
@@ -407,11 +409,11 @@ struct BlockScanView: View {
             Label("Проверка связи с блоками", systemImage: "waveform.path.ecg")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(.cyan)
-            Text("Приложение по очереди опросит известные адреса Cayenne 955 и проверит K-Line fast/slow, VW TP1.6 и TP2.0 по CAN 500/250 кбит/с.")
+            Text("Проверим адреса из профиля Touareg 7L, сопоставив их с твоим Cayenne 955. Для двигателя и приборной панели также учтены физические адреса из приложенных трасс.")
                 .font(.subheadline)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Список включает опциональные блоки разных комплектаций. TP2.0 и CAN 250 кбит/с — экспериментальные режимы. Опрос только читает ответы и не стирает ошибки, не кодирует блоки и не запускает исполнительные механизмы. Полная трасса сохраняет команды, ответы, таймауты и итоги с отметками времени.")
+            Text("Положительный ответ на запрос сеанса сам по себе не считается найденным блоком: для зелёного результата нужен читаемый идентификатор. TP1.6 проверяется на PSM и подвеске. Опрос только читает ответы и не стирает ошибки, не кодирует блоки и не запускает исполнительные механизмы. Полная трасса сохраняет команды, ответы, таймауты и итоги.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -501,6 +503,7 @@ struct BlockScanView: View {
     private var summaryCounts: some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
             ScanCount(title: "Ответили", count: answeredCount, color: .green)
+            ScanCount(title: "Ответ есть · ID не подтверждён", count: unverifiedCount, color: .orange)
             ScanCount(title: "Ответили отказом", count: negativeResponseCount, color: .purple)
             ScanCount(title: "Канал открыт", count: channelOnlyCount, color: .orange)
             ScanCount(title: "Без ответа", count: checkedWithoutAnswerCount, color: .secondary)
@@ -530,6 +533,7 @@ private struct BlockScanResultCard: View {
 
     private var color: Color {
         if result.responded { return .green }
+        if result.hasUnverifiedResponse { return .orange }
         if result.receivedNegativeResponse { return .purple }
         if result.transportOpened { return .orange }
         return result.attempts.isEmpty ? .secondary : .red
@@ -537,6 +541,7 @@ private struct BlockScanResultCard: View {
 
     private var summary: String {
         if result.responded { return "Получен ответ блока" }
+        if result.hasUnverifiedResponse { return "Есть отклик, номер блока не подтверждён" }
         if result.receivedNegativeResponse { return "ECU ответил, но отказал в проверочном сервисе" }
         if result.transportOpened { return "Транспортный канал есть · KWP молчит" }
         return result.attempts.isEmpty ? "Ожидает проверки" : "Ответа нет"
@@ -589,6 +594,7 @@ private struct BlockScanResultCard: View {
     private func attemptSymbol(_ state: BlockScanAttemptState) -> String {
         switch state {
         case .responded: return "checkmark.circle.fill"
+        case .unverifiedResponse: return "questionmark.circle.fill"
         case .negativeResponse: return "exclamationmark.circle.fill"
         case .channelOnly: return "circle.lefthalf.filled"
         case .noResponse: return "xmark.circle.fill"
@@ -598,6 +604,7 @@ private struct BlockScanResultCard: View {
     private func attemptColor(_ state: BlockScanAttemptState) -> Color {
         switch state {
         case .responded: return .green
+        case .unverifiedResponse: return .orange
         case .negativeResponse: return .purple
         case .channelOnly: return .orange
         case .noResponse: return .red
