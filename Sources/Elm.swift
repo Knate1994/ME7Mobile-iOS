@@ -197,7 +197,13 @@ final class Elm {
         var frames: [Response] = []
         for line in text.split(separator: "\n").map(String.init) {
             let upper = line.uppercased()
-            if upper.hasPrefix("BUS INIT") || upper.hasPrefix("SEARCHING") || upper == "OK" { continue }
+            if upper.hasPrefix("BUS INIT") {
+                // Surface a failed bus init: it means the address is dead and every next
+                // request would only re-run the same failing init.
+                if upper.contains("ERROR") { frames.append(Response(bytes: [], errors: [line])) }
+                continue
+            }
+            if upper.hasPrefix("SEARCHING") || upper == "OK" { continue }
             if let bytes = hexBytes(line) {
                 frames.append(Response(bytes: bytes, errors: []))
             } else {

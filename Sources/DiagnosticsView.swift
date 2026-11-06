@@ -30,9 +30,10 @@ struct ErrorsView: View {
                                 .font(.system(size: 15, weight: .bold))
                                 .multilineTextAlignment(.leading)
                             if link.clearAllState != .busy {
-                                Text("Двигатель · АКПП · ABS/ESP · подвеска")
+                                Text(link.clearableModules.map(\.title).joined(separator: " · "))
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.82))
+                                    .lineLimit(2)
                             }
                         }
                         Spacer(minLength: 0)
@@ -53,7 +54,7 @@ struct ErrorsView: View {
                 }
 
                 LazyVGrid(columns: columns, spacing: 11) {
-                    ForEach(DtcModule.allCases) { module in
+                    ForEach(DtcModule.allCases.filter { $0.isBase || link.discovered.contains($0) }) { module in
                         NavigationLink {
                             ModuleErrorsView(link: link, module: module, makeSettings: makeSettings)
                         } label: {
@@ -62,6 +63,13 @@ struct ErrorsView: View {
                         .buttonStyle(.plain)
                         .disabled(link.clearAllState == .busy)
                     }
+                }
+
+                if !link.discovered.isEmpty {
+                    Label("Блоки, ответившие при опросе, добавляются сюда автоматически: их можно подключить, прочитать и очистить. Повторный опрос уже найденные адреса пропускает.", systemImage: "checkmark.circle.badge.questionmark")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 NavigationLink {
@@ -109,7 +117,7 @@ struct ErrorsView: View {
             Button("Удалить во всех блоках", role: .destructive) { link.clearAllDtc(makeSettings()) }
             Button("Отмена", role: .cancel) {}
         } message: {
-            Text("Приложение по очереди подключится к двигателю, АКПП, ABS/ESP и подвеске. Из каждого блока будут удалены сохранённые ошибки, если блок ответит и подтвердит команду.")
+            Text("Приложение по очереди подключится к блокам: \(link.clearableModules.map(\.title).joined(separator: ", ")). Из каждого блока будут удалены сохранённые ошибки, если блок ответит и подтвердит команду.")
         }
     }
 }

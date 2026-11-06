@@ -63,6 +63,9 @@ final class Me7Link: ObservableObject {
     @Published var blockScanProgress = 0
     @Published var blockScanTotal = 0
     @Published var blockScanResults: [BlockScanResult] = []
+    /// Blocks that provably answered during this ELM connection (scan or direct connect).
+    /// Shown on the errors screen next to the four base modules.
+    @Published var discovered: Set<DtcModule> = []
     @Published var traceFileURL: URL?
     @Published var logging = false
     @Published var logText = ""
@@ -142,6 +145,13 @@ final class Me7Link: ObservableObject {
         blockScanLock.lock()
         defer { blockScanLock.unlock() }
         return blockScanStopRequested
+    }
+
+    /// Blocks offered for the mass clear: everything that answered during this connection,
+    /// or just the four base blocks until the first scan/connection finds anything.
+    var clearableModules: [DtcModule] {
+        let found = DtcModule.allCases.filter { discovered.contains($0) }
+        return found.isEmpty ? DtcModule.allCases.filter(\.isBase) : found
     }
 
     private var currentBlockScanBridgeState: String {
@@ -249,7 +259,17 @@ final class Me7Link: ObservableObject {
     }
 
     func connectElm(_ s: Settings) {
-        ui { self.trace.removeAll() }
+        ui {
+            self.trace.removeAll()
+            // New connection = fresh vehicle state: found blocks and scan results reset,
+            // so the next full scan checks every address again.
+            self.discovered.removeAll()
+            self.blockScanResults = []
+            self.blockScanState = .idle
+            self.blockScanStatus = "Полный опрос ещё не запускался"
+            self.blockScanProgress = 0
+            self.blockScanTotal = 0
+        }
         job({ self.elmFail($0) }) {
             self.closeAll()
             self.resetModules("Ожидание подключения")
@@ -405,10 +425,8 @@ final class Me7Link: ObservableObject {
         t("=== подключение: \(module.title), адрес 0x\(module.target) ===")
 
         let target = module.target
-        let links = [
-            Link(proto: "5", initAddress: "", header: "81\(target)F1"),
-            Link(proto: "4", initAddress: target, header: "81\(target)F1"),
-        ]
+        var links = module.fastInitTargets.map { Link(proto: "5", initAddress: "", header: "81\(hx($0))F1") }
+        links.append(Link(proto: "4", initAddress: target, header: "81\(target)F1"))
         var failures: [String] = []
         for link in links {
             t("--- \(link.label), заголовок \(link.header) ---")
@@ -420,6 +438,7 @@ final class Me7Link: ObservableObject {
             let (session, error) = try startSession(e, module.sessions)
             if let session = session {
                 activeModule = module
+                ui { _ = self.discovered.insert(module) }
                 let status = "Подключено · \(link.label) · сессия \(session)"
                 updateModule(module) { $0.connectionState = .ok; $0.connectionText = status }
                 t("\(module.title): подключено, \(status)")
@@ -442,6 +461,7 @@ final class Me7Link: ObservableObject {
                     let (session, error) = try startSession(e, module.sessions)
                     if let session = session {
                         activeModule = module
+                        ui { _ = self.discovered.insert(module) }
                         let status = "Подключено · \(label) · сессия \(session)"
                         updateModule(module) { $0.connectionState = .ok; $0.connectionText = status }
                         t("\(module.title): подключено через \(label), сессия \(session)")
@@ -465,6 +485,7 @@ final class Me7Link: ObservableObject {
                         let (session, error) = try startSession(e, module.sessions)
                         if let session = session {
                             activeModule = module
+                            ui { _ = self.discovered.insert(module) }
                             let status = "Подключено · \(label) · сессия \(session)"
                             updateModule(module) { $0.connectionState = .ok; $0.connectionText = status }
                             t("\(module.title): подключено через \(label), сессия \(session)")
@@ -504,15 +525,20 @@ final class Me7Link: ObservableObject {
         guard beginBlockScan() else { return }
         setBlockScanBridgeState(bridgeState)
         let targets = BlockScanTarget.cayenne955
-        let plannedChecks = targets.reduce(1) { count, target in
-            count + target.fastInitTargets.count + 1 + (target.supportsTP16 ? 1 : 0)
+        // Blocks that already answered during this ELM connection are kept as-is and
+        // skipped: re-probing them wastes minutes and can disturb open sessions.
+        let previousByAddress = Dictionary(uniqueKeysWithValues: self.blockScanResults.map { ($0.target.address, $0) })
+        let pending = targets.filter { previousByAddress[$0.address]?.responded != true }
+        let skipped = targets.count - pending.count
+        let plannedChecks = pending.reduce(0) { count, target in
+            count + (target.address == 0x01 ? 1 : 0) + target.fastInitTargets.count + 1 + (target.supportsTP16 ? 1 : 0)
         }
         ui {
             self.blockScanState = .busy
             self.blockScanStatus = "Подготовка опроса по профилю Touareg 7L…"
             self.blockScanProgress = 0
             self.blockScanTotal = plannedChecks
-            self.blockScanResults = targets.map { BlockScanResult(target: $0) }
+            self.blockScanResults = targets.map { previousByAddress[$0.address] ?? BlockScanResult(target: $0) }
         }
         job({ message in
             self.ui {
@@ -541,18 +567,25 @@ final class Me7Link: ObservableObject {
 
             let total = plannedChecks
             var progress = 0
-            var results = targets.map { BlockScanResult(target: $0) }
-            self.t("Кандидатов адресов: \(targets.count); проверок транспорта и сценариев подключения: \(total)")
+            var results = targets.map { previousByAddress[$0.address] ?? BlockScanResult(target: $0) }
+            self.t("Кандидатов адресов: \(targets.count); к опросу: \(pending.count); пропущено как уже найденные: \(skipped); проверок транспорта и сценариев подключения: \(total)")
             self.t("Адреса: \(targets.map { "0x\($0.addressText) \($0.title)" }.joined(separator: "; "))")
-            self.t("Проверки только читающие: KWP fast/slow init; TP1.6 500 кбит/с только для PSM и подвески. TP2.0 и CAN 250 не входят в профиль. Ошибки не стираются, кодирование и исполнительные тесты не запускаются.")
+            self.t("Проверки только читающие: KWP fast/slow init; TP1.6 500 кбит/с только для PSM и подвески. TP2.0 и CAN 250 не входят в профиль. Ошибки не стираются, кодирование и исполнительные тесты не запускаются. Адрес, ответивший хотя бы раз, из дальнейших проверок убирается.")
 
             for index in targets.indices {
                 if self.shouldStopBlockScan { break }
                 let target = targets[index]
+                if previousByAddress[target.address]?.responded == true {
+                    self.t("=== адрес 0x\(target.addressText): \(target.title) — уже отвечал в этом подключении, пропускаю ===")
+                    continue
+                }
                 self.t("=== адрес 0x\(target.addressText): \(target.title) ===")
 
-                func record(_ label: String, run: () throws -> BlockScanAttempt) throws {
-                    if self.shouldStopBlockScan { return }
+                /// Runs one probe and reports it. Returns the outcome so the caller can stop
+                /// checking this address as soon as anything answered.
+                @discardableResult
+                func record(_ label: String, run: () throws -> BlockScanAttempt) throws -> BlockScanAttemptState? {
+                    if self.shouldStopBlockScan { return nil }
                     progress += 1
                     let currentProgress = progress
                     let currentStatus = "\(currentProgress)/\(total) · 0x\(target.addressText) \(target.title) · \(label)"
@@ -572,21 +605,31 @@ final class Me7Link: ObservableObject {
                     case .noResponse: stateText = "НЕТ ОТВЕТА"
                     }
                     self.t("ИТОГ 0x\(target.addressText) · \(label): \(stateText) · \(attempt.detail)")
+                    if attempt.state == .responded, let module = DtcModule.module(forAddress: target.address) {
+                        self.ui { _ = self.discovered.insert(module) }
+                        self.updateModule(module) {
+                            $0.connectionText = "Найден при полном опросе · \(label)"
+                            $0.softwareNumber = attempt.detail
+                        }
+                        self.t("Блок 0x\(target.addressText) добавлен на экран ошибок как «\(module.title)»; дальнейшие проверки этого адреса не нужны")
+                    }
                     let snapshot = results
                     self.ui { self.blockScanResults = snapshot }
                     self.flushTraceFile()
+                    return attempt.state
                 }
 
+                var answered = false
                 if target.address == 0x01 {
-                    try record("Сценарий главного экрана · подключение двигателя") {
+                    answered = try record("Сценарий главного экрана · подключение двигателя") {
                         try self.probeMainEngineConnection(e, s)
-                    }
+                    } == .responded
                 }
 
-                for physicalAddress in target.fastInitTargets {
+                for physicalAddress in target.fastInitTargets where !answered {
                     let physicalText = String(format: "%02X", physicalAddress)
                     let mode = "KWP fast init · физический адрес 0x\(physicalText)"
-                    try record(mode) {
+                    answered = try record(mode) {
                         try e.prepareBlockScanKwpMode()
                         _ = try e.cmd("ATSP5")
                         let header = "81\(physicalText)F1"
@@ -594,21 +637,23 @@ final class Me7Link: ObservableObject {
                         _ = try e.cmd("ATWM\(header)3E")
                         let probe = try self.probeBlockKwp(e)
                         return BlockScanAttempt(mode: mode, state: probe.state, detail: probe.detail)
-                    }
+                    } == .responded
                 }
 
-                try record("KWP slow init · K-Line 5 бод") {
-                    try e.prepareBlockScanKwpMode()
-                    _ = try e.cmd("ATSP4")
-                    _ = try e.cmd("ATIIA\(target.addressText)")
-                    let header = "81\(target.addressText)F1"
-                    _ = try e.cmd("ATSH\(header)")
-                    _ = try e.cmd("ATWM\(header)3E")
-                    let probe = try self.probeBlockKwp(e)
-                    return BlockScanAttempt(mode: "KWP slow init · K-Line 5 бод", state: probe.state, detail: probe.detail)
+                if !answered {
+                    answered = try record("KWP slow init · K-Line 5 бод") {
+                        try e.prepareBlockScanKwpMode()
+                        _ = try e.cmd("ATSP4")
+                        _ = try e.cmd("ATIIA\(target.addressText)")
+                        let header = "81\(target.addressText)F1"
+                        _ = try e.cmd("ATSH\(header)")
+                        _ = try e.cmd("ATWM\(header)3E")
+                        let probe = try self.probeBlockKwp(e)
+                        return BlockScanAttempt(mode: "KWP slow init · K-Line 5 бод", state: probe.state, detail: probe.detail)
+                    } == .responded
                 }
 
-                if target.supportsTP16 {
+                if !answered && target.supportsTP16 {
                     let name = "VW TP1.6 · CAN 500 кбит/с"
                     try record(name) {
                         let setup = try e.connectTP16(target: target.address, baudDivisor: 1)
@@ -631,8 +676,8 @@ final class Me7Link: ObservableObject {
             let channelOnly = results.filter { !$0.responded && !$0.hasUnverifiedResponse && !$0.receivedNegativeResponse && $0.transportOpened }.count
             let stopped = self.shouldStopBlockScan
             let summary = stopped
-                ? "Остановлено пользователем: \(progress)/\(total) проверок; блоки с ID \(replied), отклик без ID \(unverified), отказали в сервисе \(negative), открыт только канал \(channelOnly)."
-                : "Завершено: блоки с подтверждённым ID \(replied), отклик без ID \(unverified), отказали в сервисе \(negative), открыт только канал \(channelOnly)."
+                ? "Остановлено пользователем: \(progress)/\(total) проверок; блоки с ID \(replied), отклик без ID \(unverified), отказали в сервисе \(negative), открыт только канал \(channelOnly); без повторного опроса найденных ранее: \(skipped)."
+                : "Завершено: блоки с подтверждённым ID \(replied), отклик без ID \(unverified), отказали в сервисе \(negative), открыт только канал \(channelOnly); без повторного опроса найденных ранее: \(skipped)."
             self.t("=== ИТОГ ПОЛНОГО ОПРОСА ===")
             self.t(summary)
             self.ui {
@@ -658,9 +703,26 @@ final class Me7Link: ObservableObject {
         var observations: [String] = []
         var negativeResponses: [Response] = []
         var sawUnverifiedResponse = false
+        // A 5-baud init takes ~3 s on the ELM side; a request sent while the init is still
+        // running aborts it (STOPPED), so every probe gets a generous ceiling. Timeouts only
+        // cap the wait — a fast answer still returns immediately. If the first request shows
+        // BUS INIT: ERROR, the address is dead and the rest would just re-run the same init.
+        var busDead = false
+
+        func busInitFailed(_ frames: [Response]) -> Bool {
+            !frames.isEmpty && frames.allSatisfy { frame in
+                frame.bytes.isEmpty && frame.errors.contains { $0.uppercased().hasPrefix("BUS INIT") }
+            }
+        }
 
         func readIdentity(_ identifier: String) throws -> String? {
-            let frames = try e.requestFramesForBlockScan(identifier, timeout: 1.2)
+            if busDead { return nil }
+            let frames = try e.requestFramesForBlockScan(identifier, timeout: 6)
+            if busInitFailed(frames) {
+                busDead = true
+                observations.append("\(identifier): инициализация K-line не удалась, блок молчит; остальные проверки адреса пропущены")
+                return nil
+            }
             if frames.isEmpty { observations.append("\(identifier): нет ответа") }
             for frame in frames {
                 t("Проба KWP \(identifier): \(frame)")
@@ -690,7 +752,16 @@ final class Me7Link: ObservableObject {
         }
 
         for service in ["1089", "1086", "1003"] {
-            let frames = try e.requestFramesForBlockScan(service, timeout: 1.5)
+            if busDead {
+                observations.append("сеанс \(service): пропущен, инициализация шины уже не удалась")
+                continue
+            }
+            let frames = try e.requestFramesForBlockScan(service, timeout: 6)
+            if busInitFailed(frames) {
+                busDead = true
+                observations.append("сеанс \(service): инициализация K-line не удалась, блок молчит; остальные проверки адреса пропущены")
+                continue
+            }
             if frames.isEmpty { observations.append("сеанс \(service): нет ответа") }
             for session in frames {
                 t("Проба KWP-сеанса \(service): \(session)")
@@ -829,7 +900,10 @@ final class Me7Link: ObservableObject {
                 let u = err.uppercased()
                 return u.contains("UNABLE") || u.contains("BUS INIT") || u.contains("BUS ERROR")
             }
-            if busError { _ = try e.cmd("ATPC") }          // close protocol, next attempt re-inits
+            if busError {
+                _ = try e.cmd("ATPC")     // close protocol, next attempt re-inits
+                break                     // the init itself failed: remaining sessions would repeat the same failing init
+            }
         }
         return (nil, reason)
     }
@@ -991,7 +1065,7 @@ final class Me7Link: ObservableObject {
                 var pendingRemaining: [String] = []
                 var acceptedCount = 0
                 var failed: [String] = []
-                for module in DtcModule.allCases {
+                for module in self.clearableModules {
                     self.setClearAll(.busy, "\(module.title): подключение…")
                     do {
                         guard try self.connectModuleOnWorker(module, e, s) else {

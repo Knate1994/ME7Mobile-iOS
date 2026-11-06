@@ -5,53 +5,130 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
     case transmission
     case absEsp
     case suspension
+    case kessy
+    case seatPassenger
+    case climate
+    case onboardSupply
+    case cruiseControl
+    case distanceControl
+    case airbag
+    case steeringColumn
+    case cluster
+    case auxHeater
+    case gateway
+    case transferCase
+    case awdControl
+    case leftHeadlight
+    case diffLock
+    case seatDriver
+    case navigation
+    case rightHeadlight
+    case laneAssist
+    case comfort
+    case amplifier
+    case headlightRange
+    case radio
+    case tvTuner
+    case steeringAngle
+    case tirePressure
+    case wipers
+    case towBar
+    case rearCamera
+    case tailgate
+    case seatPassengerAlt
+    case telematics
+    case parkAssist
+    case phone
+    case mostGateway
 
     var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .engine: return "Двигатель"
-        case .transmission: return "АКПП"
-        case .absEsp: return "ABS / ESP (PSM)"
-        case .suspension: return "Пневмоподвеска"
-        }
+
+    private struct Info {
+        let title: String
+        let symbol: String
+        let address: Int
+        var subtitle: String? = nil
+        var fastInit: [Int]? = nil
+        var hint: String? = nil
     }
-    var subtitle: String {
+
+    private var info: Info {
         switch self {
-        case .engine: return "Bosch ME7.1.1 · адрес 01"
-        case .transmission: return "Tiptronic · адрес 02"
-        case .absEsp: return "Стабилизация PSM · адрес 03"
-        case .suspension: return "Регулировка уровня · адрес 34"
-        }
-    }
-    var symbol: String {
-        switch self {
-        case .engine: return "fuelpump.fill"
-        case .transmission: return "gearshape.fill"
-        case .absEsp: return "car.fill"
-        case .suspension: return "arrow.up.and.down"
-        }
-    }
-    /// VAG/KWP target address used in physical ECU requests.
-    var target: String {
-        switch self {
-        case .engine: return "01"
-        case .transmission: return "02"
-        case .absEsp: return "03"
-        case .suspension: return "34"
-        }
-    }
-    var sessions: [String] { ["1089", "1086", "1003", "-"] }
-    var protocolHint: String? {
-        switch self {
-        case .transmission:
-            return "После K-Line приложение также пробует VW TP 1.6 по CAN 500 кбит/с. Некоторые клоны ELM327 не поддерживают CAN USER1 (AT PB / протокол B)."
-        case .absEsp:
-            return "После K-Line проверяются VW TP 1.6 и TP 2.0 по CAN на 500/250 кбит/с. TP 2.0 и CAN 250 кбит/с здесь экспериментальные варианты; клоны ELM327 могут не поддерживать CAN USER1 (AT PB / протокол B)."
-        case .suspension:
-            return "На части Cayenne 955 блок подвески работает по VW TP 1.6; если KWP2000 не отвечает, проверь поддержку этого режима адаптером."
         case .engine:
-            return nil
+            return Info(title: "Двигатель", symbol: "fuelpump.fill", address: 0x01,
+                        subtitle: "Bosch ME7.1.1 · адрес 01", fastInit: [0x10, 0x01])
+        case .transmission:
+            return Info(title: "АКПП", symbol: "gearshape.fill", address: 0x02,
+                        subtitle: "Tiptronic · адрес 02",
+                        hint: "После K-Line приложение также пробует VW TP 1.6 по CAN 500 кбит/с. Некоторые клоны ELM327 не поддерживают CAN USER1 (AT PB / протокол B).")
+        case .absEsp:
+            return Info(title: "ABS / ESP (PSM)", symbol: "car.fill", address: 0x03,
+                        subtitle: "Стабилизация PSM · адрес 03",
+                        hint: "После K-Line проверяются VW TP 1.6 и TP 2.0 по CAN на 500/250 кбит/с. TP 2.0 и CAN 250 кбит/с здесь экспериментальные варианты; клоны ELM327 могут не поддерживать CAN USER1 (AT PB / протокол B).")
+        case .suspension:
+            return Info(title: "Пневмоподвеска", symbol: "arrow.up.and.down", address: 0x34,
+                        subtitle: "Регулировка уровня · адрес 34",
+                        hint: "На части Cayenne 955 блок подвески работает по VW TP 1.6; если KWP2000 не отвечает, проверь поддержку этого режима адаптером.")
+        case .cluster:
+            return Info(title: "Приборная панель", symbol: "speedometer", address: 0x17,
+                        subtitle: "KOMBI · адрес 17, физический 61", fastInit: [0x61, 0x17])
+        case .transferCase:
+            return Info(title: "Раздаточная коробка", symbol: "gear", address: 0x1C,
+                        subtitle: "TRANSFERCASE · адрес 1C", fastInit: [0x1C, 0x22])
+        case .kessy: return Info(title: "KESSY · доступ и запуск", symbol: "key.fill", address: 0x05)
+        case .seatPassenger: return Info(title: "Память пассажирского сиденья", symbol: "person.fill", address: 0x06)
+        case .climate: return Info(title: "Климат-контроль", symbol: "fan.fill", address: 0x08)
+        case .onboardSupply: return Info(title: "Бортовая электрика", symbol: "bolt.fill", address: 0x09)
+        case .cruiseControl: return Info(title: "Круиз-контроль", symbol: "timer", address: 0x11)
+        case .distanceControl: return Info(title: "Контроль дистанции", symbol: "dot.radiowaves.left.and.right", address: 0x13)
+        case .airbag: return Info(title: "Airbag / SRS", symbol: "shield.fill", address: 0x15)
+        case .steeringColumn: return Info(title: "Электроника рулевой колонки", symbol: "steeringwheel", address: 0x16)
+        case .auxHeater: return Info(title: "Дополнительный отопитель", symbol: "flame.fill", address: 0x18)
+        case .gateway: return Info(title: "CAN-шлюз", symbol: "arrow.triangle.branch", address: 0x19)
+        case .awdControl: return Info(title: "Раздаточная коробка / AWD (0x22)", symbol: "arrow.triangle.swap", address: 0x22)
+        case .leftHeadlight: return Info(title: "Левая фара", symbol: "headlight.high.beam.fill", address: 0x29)
+        case .diffLock: return Info(title: "Блокировка дифференциала", symbol: "lock.rotation", address: 0x32)
+        case .seatDriver: return Info(title: "Память водительского сиденья", symbol: "person.fill", address: 0x36)
+        case .navigation: return Info(title: "Навигация / PCM", symbol: "map.fill", address: 0x37)
+        case .rightHeadlight: return Info(title: "Правая фара", symbol: "headlight.high.beam.fill", address: 0x39)
+        case .laneAssist: return Info(title: "Ассистент перестроения", symbol: "road.lanes", address: 0x3C)
+        case .comfort: return Info(title: "Комфорт / центральный замок", symbol: "house.fill", address: 0x46)
+        case .amplifier: return Info(title: "Усилитель аудиосистемы", symbol: "speaker.wave.3.fill", address: 0x47)
+        case .headlightRange: return Info(title: "Корректор фар", symbol: "flashlight.on.fill", address: 0x55)
+        case .radio: return Info(title: "Радио", symbol: "antenna.radiowaves.left.and.right", address: 0x56)
+        case .tvTuner: return Info(title: "ТВ-тюнер", symbol: "tv.fill", address: 0x57)
+        case .steeringAngle: return Info(title: "Датчик угла поворота руля", symbol: "rotate.right.fill", address: 0x64)
+        case .tirePressure: return Info(title: "Контроль давления шин", symbol: "exclamationmark.circle", address: 0x65)
+        case .wipers: return Info(title: "Стеклоочистители", symbol: "drop.fill", address: 0x68)
+        case .towBar: return Info(title: "Фаркоп / прицеп", symbol: "link", address: 0x69)
+        case .rearCamera: return Info(title: "Камера заднего вида", symbol: "camera.fill", address: 0x6C)
+        case .tailgate: return Info(title: "Электропривод задней двери", symbol: "rectangle.portrait.and.arrow.forward", address: 0x6D)
+        case .seatPassengerAlt: return Info(title: "Память пассажирского сиденья (0x6E)", symbol: "person.fill", address: 0x6E)
+        case .telematics: return Info(title: "Телематика", symbol: "network", address: 0x75)
+        case .parkAssist: return Info(title: "Парктроники ParkAssist", symbol: "parkingsign.circle.fill", address: 0x76)
+        case .phone: return Info(title: "Телефон", symbol: "phone.fill", address: 0x77)
+        case .mostGateway: return Info(title: "MOST-шлюз · Cayenne", symbol: "point.3.connected.trianglepath.dotted", address: 0x82)
         }
+    }
+
+    var title: String { info.title }
+    var subtitle: String { info.subtitle ?? "KWP2000 · адрес \(target)" }
+    var symbol: String { info.symbol }
+    /// VAG/KWP logical diagnostic address.
+    var address: Int { info.address }
+    /// VAG/KWP target address used in physical ECU requests.
+    var target: String { hx(info.address) }
+    /// Physical fast-init addresses tried before the 5-baud init on the logical address.
+    var fastInitTargets: [Int] { info.fastInit ?? [info.address] }
+    var sessions: [String] { ["1089", "1086", "1003", "-"] }
+    var protocolHint: String? { info.hint }
+
+    /// The four blocks always shown on the errors screen; the rest appear once discovered.
+    var isBase: Bool { self == .engine || self == .transmission || self == .absEsp || self == .suspension }
+
+    /// Module that owns this logical address in the Cayenne 955 scan profile.
+    static func module(forAddress address: Int) -> DtcModule? {
+        DtcModule.allCases.first { $0.address == address }
     }
 }
 
@@ -110,7 +187,7 @@ struct BlockScanTarget: Identifiable, Hashable {
         .init(address: 0x17, title: "Приборная панель", fastInitTargets: [0x61, 0x17]),
         .init(address: 0x18, title: "Дополнительный отопитель"),
         .init(address: 0x19, title: "CAN-шлюз"),
-        .init(address: 0x1C, title: "Датчик положения автомобиля"),
+        .init(address: 0x1C, title: "Раздаточная коробка (VTG) · по трассе Cayenne"),
         .init(address: 0x22, title: "Раздаточная коробка / AWD"),
         .init(address: 0x29, title: "Левая фара"),
         .init(address: 0x32, title: "Блокировка дифференциала"),
