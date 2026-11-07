@@ -60,15 +60,15 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
         case .transmission:
             return Info(title: "АКПП", symbol: "gearshape.fill", address: 0x02,
                         subtitle: "Tiptronic · адрес 02",
-                        hint: "После K-Line приложение также пробует VW TP 1.6 по CAN 500 кбит/с. Некоторые клоны ELM327 не поддерживают CAN USER1 (AT PB / протокол B).")
+                        hint: "АКПП на Cayenne 955 опрашивается по K-line (KWP2000), как и остальные блоки. Если не отвечает — проверь питание блока и диагностическую линию (контакты 3/7 OBD).")
         case .absEsp:
             return Info(title: "ABS / ESP (PSM)", symbol: "car.fill", address: 0x03,
                         subtitle: "Стабилизация PSM · адрес 03",
-                        hint: "После K-Line проверяются VW TP 1.6 и TP 2.0 по CAN на 500/250 кбит/с. TP 2.0 и CAN 250 кбит/с здесь экспериментальные варианты; клоны ELM327 могут не поддерживать CAN USER1 (AT PB / протокол B).")
+                        hint: "PSM на Cayenne 955 работает по K-line (KWP2000). Если не отвечает — проверь питание блока и диагностическую линию (контакты 3/7 OBD).")
         case .suspension:
             return Info(title: "Пневмоподвеска", symbol: "arrow.up.and.down", address: 0x34,
                         subtitle: "Регулировка уровня · адрес 34",
-                        hint: "На части Cayenne 955 блок подвески работает по VW TP 1.6; если KWP2000 не отвечает, проверь поддержку этого режима адаптером.")
+                        hint: "Блок подвески на Cayenne 955 опрашивается по K-line (KWP2000). Если не отвечает — проверь питание блока и K-line.")
         case .cluster:
             return Info(title: "Приборная панель", symbol: "speedometer", address: 0x17,
                         subtitle: "KOMBI · адрес 17, физический 61", fastInit: [0x61, 0x17])
@@ -157,14 +157,11 @@ struct BlockScanTarget: Identifiable, Hashable {
     let title: String
     /// Physical KWP fast-init targets used by some ECUs for this logical module.
     let fastInitTargets: [Int]
-    /// Whether this module is documented/reasonable to probe with VW TP 1.6 on this car.
-    let supportsTP16: Bool
 
-    init(address: Int, title: String, fastInitTargets: [Int]? = nil, supportsTP16: Bool = false) {
+    init(address: Int, title: String, fastInitTargets: [Int]? = nil) {
         self.address = address
         self.title = title
         self.fastInitTargets = fastInitTargets ?? [address]
-        self.supportsTP16 = supportsTP16
     }
 
     var id: Int { address }
@@ -175,7 +172,7 @@ struct BlockScanTarget: Identifiable, Hashable {
     static let cayenne955: [BlockScanTarget] = [
         .init(address: 0x01, title: "Двигатель", fastInitTargets: [0x10, 0x01]),
         .init(address: 0x02, title: "АКПП Tiptronic"),
-        .init(address: 0x03, title: "ABS / ESP (PSM)", supportsTP16: true),
+        .init(address: 0x03, title: "ABS / ESP (PSM)"),
         .init(address: 0x05, title: "KESSY · доступ и запуск"),
         .init(address: 0x06, title: "Память пассажирского сиденья"),
         .init(address: 0x08, title: "Климат-контроль"),
@@ -191,7 +188,7 @@ struct BlockScanTarget: Identifiable, Hashable {
         .init(address: 0x22, title: "Раздаточная коробка / AWD"),
         .init(address: 0x29, title: "Левая фара"),
         .init(address: 0x32, title: "Блокировка дифференциала"),
-        .init(address: 0x34, title: "Пневмоподвеска / регулировка уровня", supportsTP16: true),
+        .init(address: 0x34, title: "Пневмоподвеска / регулировка уровня"),
         .init(address: 0x36, title: "Память водительского сиденья"),
         .init(address: 0x37, title: "Навигация / PCM"),
         .init(address: 0x39, title: "Правая фара"),

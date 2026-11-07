@@ -81,6 +81,9 @@ struct ContentView: View {
                         connectionStatus("ELM327", state: link.elmState, text: link.elmText, symbol: "wifi")
                         connectionStatus("ЭБУ двигателя", state: link.ecuState, text: link.ecuText, symbol: "cpu")
                     }
+                    if !link.discovered.isEmpty {
+                        discoveredCard
+                    }
                     swipeHint
                     settingsPanel
                 }
@@ -188,6 +191,39 @@ struct ContentView: View {
         .font(.system(size: 12, weight: .medium))
         .foregroundColor(.secondary)
         .padding(.vertical, 1)
+    }
+
+    /// Blocks that answered during this connection (scan or direct connect) — tap opens
+    /// the errors screen where each of them can be read and cleared.
+    private var discoveredCard: some View {
+        let modules = DtcModule.allCases.filter { link.discovered.contains($0) }
+        return Button { navigate(to: 1) } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundColor(.green)
+                    .frame(width: 42, height: 42)
+                    .background(Color.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Найдены блоки: \(modules.count)")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(.primary)
+                    Text(modules.map(\.title).joined(separator: " · "))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(.secondary)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 
     private var pageNavigation: some View {

@@ -137,6 +137,7 @@ final class Elm {
         conn.send(content: Data((c + "\r").utf8), completion: .contentProcessed { _ in })
         let start = Date()
         var raw = Data()
+        var deadline = timeout
         while true {
             lock.lock()
             if let i = buffer.firstIndex(of: UInt8(ascii: ">")) {
@@ -146,10 +147,20 @@ final class Elm {
                 break
             }
             let isClosed = closed
+            let partial = buffer
             lock.unlock()
             if isClosed { throw ElmError.closed }
-            let left = timeout - Date().timeIntervalSince(start)
+            let left = deadline - Date().timeIntervalSince(start)
             if left <= 0 {
+                // A 5-baud init reports progress ("BUS INIT: ...") before the final OK/ERROR,
+                // which can take 4-6 s. Returning mid-init lets the next command abort it
+                // (STOPPED) and poisons every following probe, so wait the init out.
+                let text = String(decoding: partial, as: UTF8.self).uppercased()
+                let initRunning = text.contains("BUS INIT") && !text.contains("OK") && !text.contains("ERROR")
+                if initRunning && deadline < timeout + 12 {
+                    deadline += 3
+                    continue
+                }
                 lock.lock(); raw = buffer; buffer.removeAll(); lock.unlock()
                 break
             }
@@ -219,6 +230,7 @@ final class Elm {
         tp16Channel = nil
         tp20Channel = nil
         _ = try cmd("ATPC")
+        Thread.sleep(forTimeInterval: 0.15)   // let the K-line go idle before the next init
         for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATST64"] {
             _ = try cmd(command)
         }
@@ -400,6 +412,7 @@ final class Elm {
         tp16Channel = nil
         tp20Channel = nil
         _ = try cmd("ATPC")
+        Thread.sleep(forTimeInterval: 0.15)   // let the K-line go idle before the next init
         for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATST64", "ATCRA"] {
             _ = try cmd(command)
         }

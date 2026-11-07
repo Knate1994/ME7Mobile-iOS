@@ -81,6 +81,9 @@ final class Me7Link: ObservableObject {
     private var traceFile: FileHandle?
     private var ecuOk = false
     private var activeModule: DtcModule?
+    private var lastSettings: Settings?
+    /// Link variant that worked for each module during this ELM connection; tried first next time.
+    private var workingLinks: [DtcModule: Link] = [:]
     private let flagLock = NSLock()
     private let clearAllLock = NSLock()
     private let blockScanLock = NSLock()
@@ -271,6 +274,7 @@ final class Me7Link: ObservableObject {
             self.blockScanTotal = 0
         }
         job({ self.elmFail($0) }) {
+            self.lastSettings = s
             self.closeAll()
             self.resetModules("Ожидание подключения")
             self.setEcu(.idle, "НЕ ПОДКЛЮЧЕНО")
@@ -370,6 +374,10 @@ final class Me7Link: ObservableObject {
         where !links.contains(where: { $0.proto == link.proto && $0.header == link.header }) {
             links.append(link)
         }
+        if let known = workingLinks[.engine] {
+            links.removeAll { $0.proto == known.proto && $0.initAddress == known.initAddress && $0.header == known.header }
+            links.insert(known, at: 0)
+        }
         var results: [String] = []
         for link in links {
             setEcu(.busy, (["Инициализация: \(link.label)…"] + results).joined(separator: "\n"))
@@ -383,6 +391,7 @@ final class Me7Link: ObservableObject {
             if let session = session {
                 ecuOk = true
                 activeModule = .engine
+                workingLinks[.engine] = link
                 t("ЭБУ подключён: \(link.label), сессия \(session)")
                 setEcu(.ok, "ПОДКЛЮЧЕНО · \(link.label) · сессия \(session)")
                 updateModule(.engine) { $0.connectionState = .ok; $0.connectionText = "Подключено · \(link.label) · сессия \(session)" }
@@ -427,6 +436,10 @@ final class Me7Link: ObservableObject {
         let target = module.target
         var links = module.fastInitTargets.map { Link(proto: "5", initAddress: "", header: "81\(hx($0))F1") }
         links.append(Link(proto: "4", initAddress: target, header: "81\(target)F1"))
+        if let known = workingLinks[module] {
+            links.removeAll { $0.proto == known.proto && $0.initAddress == known.initAddress && $0.header == known.header }
+            links.insert(known, at: 0)
+        }
         var failures: [String] = []
         for link in links {
             t("--- \(link.label), заголовок \(link.header) ---")
@@ -438,6 +451,7 @@ final class Me7Link: ObservableObject {
             let (session, error) = try startSession(e, module.sessions)
             if let session = session {
                 activeModule = module
+                workingLinks[module] = link
                 ui { _ = self.discovered.insert(module) }
                 let status = "Подключено · \(link.label) · сессия \(session)"
                 updateModule(module) { $0.connectionState = .ok; $0.connectionText = status }
@@ -449,61 +463,9 @@ final class Me7Link: ObservableObject {
             _ = try e.cmd("ATPC")
         }
 
-        if module == .transmission || module == .absEsp {
-            let targetAddress = Int(target, radix: 16) ?? 0
-            let tp16Rates = module == .absEsp ? [1, 2] : [1]
-            for divisor in tp16Rates {
-                let baud = divisor == 1 ? 500 : 500 / divisor
-                let label = "VW TP1.6 / CAN \(baud) кбит/с"
-                t("--- альтернативная попытка: \(label) ---")
-                let setup = try e.connectTP16(target: targetAddress, baudDivisor: divisor)
-                if setup.connected {
-                    let (session, error) = try startSession(e, module.sessions)
-                    if let session = session {
-                        activeModule = module
-                        ui { _ = self.discovered.insert(module) }
-                        let status = "Подключено · \(label) · сессия \(session)"
-                        updateModule(module) { $0.connectionState = .ok; $0.connectionText = status }
-                        t("\(module.title): подключено через \(label), сессия \(session)")
-                        try readSoftwareNumber(e, module: module)
-                        return true
-                    }
-                    failures.append("\(label): канал открыт, но KWP-сессия не ответила (\(error))")
-                    e.disconnectTP16()
-                } else {
-                    failures.append("\(label): \(setup.reason)")
-                }
-            }
-
-            if module == .absEsp {
-                for divisor in [1, 2] {
-                    let baud = divisor == 1 ? 500 : 500 / divisor
-                    let label = "VW TP2.0 / CAN \(baud) кбит/с"
-                    t("--- альтернативная попытка: \(label) ---")
-                    let setup = try e.connectTP20(target: targetAddress, baudDivisor: divisor)
-                    if setup.connected {
-                        let (session, error) = try startSession(e, module.sessions)
-                        if let session = session {
-                            activeModule = module
-                            ui { _ = self.discovered.insert(module) }
-                            let status = "Подключено · \(label) · сессия \(session)"
-                            updateModule(module) { $0.connectionState = .ok; $0.connectionText = status }
-                            t("\(module.title): подключено через \(label), сессия \(session)")
-                            try readSoftwareNumber(e, module: module)
-                            return true
-                        }
-                        failures.append("\(label): канал открыт, но KWP-сессия не ответила (\(error))")
-                        e.disconnectTP16()
-                    } else {
-                        failures.append("\(label): \(setup.reason)")
-                    }
-                }
-            }
-        }
-
         var message = failures.joined(separator: "\n")
         if let hint = module.protocolHint { message += "\n\(hint)" }
-        message += "\nПроверь питание блока, диагностическую линию (OBD 3/7) и CAN на контактах 6/14."
+        message += "\nПроверь питание блока и диагностическую линию (контакты 3/7 OBD)."
         moduleConnectionFail(module, message)
         return false
     }
@@ -531,7 +493,7 @@ final class Me7Link: ObservableObject {
         let pending = targets.filter { previousByAddress[$0.address]?.responded != true }
         let skipped = targets.count - pending.count
         let plannedChecks = pending.reduce(0) { count, target in
-            count + (target.address == 0x01 ? 1 : 0) + target.fastInitTargets.count + 1 + (target.supportsTP16 ? 1 : 0)
+            count + (target.address == 0x01 ? 1 : 0) + target.fastInitTargets.count + 1
         }
         ui {
             self.blockScanState = .busy
@@ -563,19 +525,22 @@ final class Me7Link: ObservableObject {
             }
             self.activeModule = nil
             self.setEcu(.idle, "Выполняется полный опрос блоков")
-            e.disconnectTP16()
 
             let total = plannedChecks
             var progress = 0
             var results = targets.map { previousByAddress[$0.address] ?? BlockScanResult(target: $0) }
             self.t("Кандидатов адресов: \(targets.count); к опросу: \(pending.count); пропущено как уже найденные: \(skipped); проверок транспорта и сценариев подключения: \(total)")
             self.t("Адреса: \(targets.map { "0x\($0.addressText) \($0.title)" }.joined(separator: "; "))")
-            self.t("Проверки только читающие: KWP fast/slow init; TP1.6 500 кбит/с только для PSM и подвески. TP2.0 и CAN 250 не входят в профиль. Ошибки не стираются, кодирование и исполнительные тесты не запускаются. Адрес, ответивший хотя бы раз, из дальнейших проверок убирается.")
+            self.t("Проверки только читающие: KWP2000 по K-line (fast init и slow init 5 бод) — на Cayenne 955 все блоки отвечают именно так. Ошибки не стираются, кодирование и исполнительные тесты не запускаются. Адрес, ответивший хотя бы раз, из дальнейших проверок убирается.")
 
             for index in targets.indices {
                 if self.shouldStopBlockScan { break }
                 let target = targets[index]
-                if previousByAddress[target.address]?.responded == true {
+                let alreadyResponded = previousByAddress[target.address]?.responded == true
+                let plannedForTarget = alreadyResponded ? 0
+                    : (target.address == 0x01 ? 1 : 0) + target.fastInitTargets.count + 1
+                let progressBeforeTarget = progress
+                if alreadyResponded {
                     self.t("=== адрес 0x\(target.addressText): \(target.title) — уже отвечал в этом подключении, пропускаю ===")
                     continue
                 }
@@ -636,6 +601,9 @@ final class Me7Link: ObservableObject {
                         _ = try e.cmd("ATSH\(header)")
                         _ = try e.cmd("ATWM\(header)3E")
                         let probe = try self.probeBlockKwp(e)
+                        if probe.state == .responded, let module = DtcModule.module(forAddress: target.address) {
+                            self.workingLinks[module] = Link(proto: "5", initAddress: "", header: header)
+                        }
                         return BlockScanAttempt(mode: mode, state: probe.state, detail: probe.detail)
                     } == .responded
                 }
@@ -649,35 +617,26 @@ final class Me7Link: ObservableObject {
                         _ = try e.cmd("ATSH\(header)")
                         _ = try e.cmd("ATWM\(header)3E")
                         let probe = try self.probeBlockKwp(e)
+                        if probe.state == .responded, let module = DtcModule.module(forAddress: target.address) {
+                            self.workingLinks[module] = Link(proto: "4", initAddress: target.addressText, header: header)
+                        }
                         return BlockScanAttempt(mode: "KWP slow init · K-Line 5 бод", state: probe.state, detail: probe.detail)
                     } == .responded
                 }
 
-                if !answered && target.supportsTP16 {
-                    let name = "VW TP1.6 · CAN 500 кбит/с"
-                    try record(name) {
-                        let setup = try e.connectTP16(target: target.address, baudDivisor: 1)
-                        guard setup.connected else { return BlockScanAttempt(mode: name, state: .noResponse, detail: setup.reason) }
-                        let probe = try self.probeBlockKwp(e)
-                        e.disconnectTP16()
-                        if probe.state == .responded || probe.state == .unverifiedResponse || probe.state == .negativeResponse {
-                            return BlockScanAttempt(mode: name, state: probe.state, detail: probe.detail)
-                        }
-                        return BlockScanAttempt(mode: name, state: .channelOnly,
-                                                detail: "транспортный канал открыт; диагностический KWP-ответ не получен (\(probe.detail))")
-                    }
-                }
+                // Probes skipped after an early answer still count toward the planned total,
+                // otherwise the progress bar stalls below 100% on a successful scan.
+                let leftover = plannedForTarget - (progress - progressBeforeTarget)
+                if leftover > 0, !self.shouldStopBlockScan { progress += leftover }
             }
 
-            e.disconnectTP16()
             let replied = results.filter(\.responded).count
             let unverified = results.filter { !$0.responded && $0.hasUnverifiedResponse }.count
             let negative = results.filter { !$0.responded && !$0.hasUnverifiedResponse && $0.receivedNegativeResponse }.count
-            let channelOnly = results.filter { !$0.responded && !$0.hasUnverifiedResponse && !$0.receivedNegativeResponse && $0.transportOpened }.count
             let stopped = self.shouldStopBlockScan
             let summary = stopped
-                ? "Остановлено пользователем: \(progress)/\(total) проверок; блоки с ID \(replied), отклик без ID \(unverified), отказали в сервисе \(negative), открыт только канал \(channelOnly); без повторного опроса найденных ранее: \(skipped)."
-                : "Завершено: блоки с подтверждённым ID \(replied), отклик без ID \(unverified), отказали в сервисе \(negative), открыт только канал \(channelOnly); без повторного опроса найденных ранее: \(skipped)."
+                ? "Остановлено пользователем: \(progress)/\(total) проверок; блоки с ID \(replied), отклик без ID \(unverified), отказали в сервисе \(negative); без повторного опроса найденных ранее: \(skipped)."
+                : "Завершено: блоки с подтверждённым ID \(replied), отклик без ID \(unverified), отказали в сервисе \(negative); без повторного опроса найденных ранее: \(skipped)."
             self.t("=== ИТОГ ПОЛНОГО ОПРОСА ===")
             self.t(summary)
             self.ui {
@@ -773,9 +732,11 @@ final class Me7Link: ObservableObject {
                 sawUnverifiedResponse = true
                 for identifier in ["1A9B", "1A91"] {
                     if let identity = try readIdentity(identifier) {
+                        _ = try? e.request("1082", timeout: 1)   // close the probe session politely
                         return (nil, nil, .responded, "Сеанс \(service); подтверждён идентификатор блока: \(identity)")
                     }
                 }
+                _ = try? e.request("1082", timeout: 1)
                 return (session, nil, .unverifiedResponse,
                         "Блок принял диагностический сеанс \(service), но не выдал проверяемый номер; не считаю это подтверждённым блоком")
             }
@@ -825,6 +786,8 @@ final class Me7Link: ObservableObject {
                 }
                 if software != nil { break }
             }
+            workingLinks[.engine] = link
+            _ = try? e.request("1082", timeout: 1)   // close the probe session politely
             return BlockScanAttempt(
                 mode: "Сценарий главного экрана · подключение двигателя",
                 state: software == nil ? .unverifiedResponse : .responded,
@@ -855,7 +818,7 @@ final class Me7Link: ObservableObject {
     private func readSoftwareNumber(_ e: Elm, module: DtcModule) throws {
         for option in ["9B", "91"] {
             do {
-                let response = try e.request("1A\(option)", timeout: 4)
+                let response = try requestFinal(e, "1A\(option)", service: 0x1A, timeout: 4)
                 guard response.isPositive(0x1A), response.bytes.count > 2 else { continue }
                 let value = Dtc.identificationText(Array(response.bytes.dropFirst(2)))
                 let label = "1A \(option) · \(value)"
@@ -908,6 +871,41 @@ final class Me7Link: ObservableObject {
         return (nil, reason)
     }
 
+    /// KWP blocks often answer 7F xx 78 ("response pending") first and send the final response
+    /// later; cheap ELM clones return to the prompt after that first frame and never deliver the
+    /// final one. Resend the request until the final answer or a real refusal arrives.
+    private func requestFinal(_ e: Elm, _ hex: String, service: Int, timeout: Double, attempts: Int = 4) throws -> Response {
+        var last = Response(bytes: [], errors: [])
+        for attempt in 0..<attempts {
+            let r = try e.request(hex, timeout: timeout)
+            last = r
+            if r.isPositive(service) { return r }
+            // Pending and final frames merged into one buffer: cut everything up to the positive frame.
+            if r.negative, let start = r.bytes.firstIndex(of: service + 0x40) {
+                return Response(bytes: Array(r.bytes[start...]), errors: r.errors)
+            }
+            let pendingOnly = r.negative && r.bytes.count > 2 && r.bytes[1] == service && r.bytes[2] == 0x78
+            if pendingOnly {
+                t("запрос \(hex): блок попросил время (7F \(hx(service)) 78), жду и повторяю (\(attempt + 1)/\(attempts))")
+                Thread.sleep(forTimeInterval: 0.8)
+                continue
+            }
+            return r
+        }
+        return last
+    }
+
+    /// Module request with recovery: if the block stays silent (the KWP session expired while
+    /// the app was idle), reconnects to the module once and retries the request.
+    private func moduleRequestFinal(_ e: Elm, _ module: DtcModule, _ hex: String, service: Int, timeout: Double) throws -> Response {
+        let first = try requestFinal(e, hex, service: service, timeout: timeout)
+        let silent = first.bytes.isEmpty && first.errors.isEmpty
+        guard silent, activeModule == module, let s = lastSettings else { return first }
+        t("\(module.title): нет ответа на \(hex); сеанс мог завершиться по таймауту — переподключаюсь и повторяю запрос")
+        guard try connectModuleOnWorker(module, e, s) else { return first }
+        return try requestFinal(e, hex, service: service, timeout: timeout)
+    }
+
     /// Standard OBD requests tell apart "adapter has no working K-line" from "K-line works, ECU ignores our init".
     /// Leaves the ECU disconnected and the ELM back in its base setup.
     func probeBus() {
@@ -948,32 +946,33 @@ final class Me7Link: ObservableObject {
 
     // ---------- fault codes ----------
 
-    /// KWP 0x18 readDiagnosticTroubleCodesByStatus, all groups. Answer: 58 n (hi lo status)*, possibly split over several lines.
+    /// KWP 0x18 readDiagnosticTroubleCodesByStatus, all groups. Answer: 58 n (hi lo status)*.
     func readDtc() {
         job({ self.dtcFail($0) }) {
             guard let e = self.elm, self.ecuOk else { self.dtcFail("сначала подключи ЭБУ"); return }
             self.setDtc(.busy, "Чтение ошибок…")
             self.t("=== чтение ошибок ===")
-            let text = try e.cmd("1802FF00", timeout: 5)
-            var codes: [String] = []
-            var answered = false
-            for line in text.split(separator: "\n") {
-                guard let b = hexBytes(String(line)) else { continue }
-                if b[0] == 0x7F {
-                    self.dtcFail("отказ 7F \(hx(b.count > 1 ? b[1] : 0)) \(hx(b.count > 2 ? b[2] : 0))")
-                    return
-                }
-                if b[0] != 0x58 { continue }
-                answered = true
-                var i = 2
-                while i + 2 < b.count { codes.append(Dtc.describe(b[i], b[i + 1], b[i + 2])); i += 3 }
-            }
-            if !answered {
-                self.dtcFail("нет ответа (\(text.isEmpty ? "пусто" : text.replacingOccurrences(of: "\n", with: "; ")))")
+            let response = try self.moduleRequestFinal(e, .engine, "1802FF00", service: 0x18, timeout: 8)
+            if response.negative {
+                self.dtcFail("отказ 7F \(hx(response.bytes.count > 1 ? response.bytes[1] : 0)) \(hx(response.bytes.count > 2 ? response.bytes[2] : 0))")
                 return
             }
-            let msg = codes.isEmpty ? "Ошибок нет" : "Ошибок: \(codes.count)\n" + codes.joined(separator: "\n")
+            guard let codes = Dtc.entries(from: response.bytes, module: .engine) else {
+                let detail = response.bytes.isEmpty
+                    ? (response.errors.isEmpty ? "пусто" : response.errors.joined(separator: "; "))
+                    : "неизвестный формат ответа: \(response)"
+                self.dtcFail("нет ответа (\(detail))")
+                return
+            }
+            let msg = codes.isEmpty ? "Ошибок нет" : "Ошибок: \(codes.count)\n" + codes
+                .map { "\($0.code) — \($0.description) · статус 0x\(hx($0.status))" }
+                .joined(separator: "\n")
             self.t(msg)
+            self.updateModule(.engine) {
+                $0.dtcState = .ok
+                $0.dtcText = codes.isEmpty ? "Ошибок нет" : "Найдено ошибок: \(codes.count)"
+                $0.codes = codes
+            }
             self.setDtc(codes.isEmpty ? .ok : .fail, msg)
         }
     }
@@ -985,7 +984,7 @@ final class Me7Link: ObservableObject {
             self.setDtc(.busy, "Стирание ошибок…")
             self.t("=== стирание ошибок ===")
             let before = try self.readDtcSnapshotForClear(e, module: .engine)
-            let r = try e.request("14FF00", timeout: 5)
+            let r = try self.moduleRequestFinal(e, .engine, "14FF00", service: 0x14, timeout: 8)
             self.t("стирание: \(r)")
             let outcome = self.clearAckOutcome(r)
             self.t("результат команды очистки: \(outcome.detail)")
@@ -1032,7 +1031,7 @@ final class Me7Link: ObservableObject {
             if module == .engine { self.setDtc(.busy, "Стирание ошибок…") }
             self.t("=== стирание ошибок: \(module.title) ===")
             let before = try self.readDtcSnapshotForClear(e, module: module)
-            let response = try e.request("14FF00", timeout: 8)
+            let response = try self.moduleRequestFinal(e, module, "14FF00", service: 0x14, timeout: 8)
             self.t("ответ блока на стирание: \(response)")
             let outcome = self.clearAckOutcome(response)
             self.t("результат команды очистки: \(outcome.detail)")
@@ -1077,7 +1076,7 @@ final class Me7Link: ObservableObject {
                         if module == .engine { self.setDtc(.busy, "Стирание ошибок…") }
                         self.t("=== массовая очистка: \(module.title) ===")
                         let before = try self.readDtcSnapshotForClear(e, module: module)
-                        let clearResponse = try e.request("14FF00", timeout: 8)
+                        let clearResponse = try self.moduleRequestFinal(e, module, "14FF00", service: 0x14, timeout: 8)
                         self.t("ответ блока на очистку \(module.title): \(clearResponse)")
                         let outcome = self.clearAckOutcome(clearResponse)
                         self.t("результат команды очистки \(module.title): \(outcome.detail)")
@@ -1133,7 +1132,7 @@ final class Me7Link: ObservableObject {
     }
 
     private func readDtcSnapshotForClear(_ e: Elm, module: DtcModule) throws -> [DtcEntry]? {
-        let response = try e.request("1802FF00", timeout: 8)
+        let response = try moduleRequestFinal(e, module, "1802FF00", service: 0x18, timeout: 8)
         guard let codes = Dtc.entries(from: response.bytes, module: module) else {
             t("Снимок до очистки \(module.title) не распознан: \(response)")
             return nil
@@ -1232,7 +1231,7 @@ final class Me7Link: ObservableObject {
     }
 
     private func readDtcOnWorker(_ e: Elm, module: DtcModule) throws -> [DtcEntry]? {
-        let response = try e.request("1802FF00", timeout: 8)
+        let response = try moduleRequestFinal(e, module, "1802FF00", service: 0x18, timeout: 8)
         if response.negative {
             let service = response.bytes.count > 1 ? hx(response.bytes[1]) : "??"
             let code = response.bytes.count > 2 ? hx(response.bytes[2]) : "??"
