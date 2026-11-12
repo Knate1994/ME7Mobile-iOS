@@ -123,8 +123,14 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
     var sessions: [String] { ["1089", "1086", "1003", "-"] }
     var protocolHint: String? { info.hint }
 
-    /// The four blocks always shown on the errors screen; the rest appear once discovered.
-    var isBase: Bool { self == .engine || self == .transmission || self == .absEsp || self == .suspension }
+    /// Blocks always shown on the errors screen: the drivetrain trio plus the blocks this
+    /// Cayenne 955 provably answered from in the traces (раздатка 0x1C, стеклоочистители 0x68).
+    var isBase: Bool {
+        switch self {
+        case .engine, .transmission, .absEsp, .suspension, .transferCase, .wipers: return true
+        default: return false
+        }
+    }
 
     /// Module that owns this logical address in the Cayenne 955 scan profile.
     static func module(forAddress address: Int) -> DtcModule? {
@@ -169,8 +175,10 @@ struct BlockScanTarget: Identifiable, Hashable {
 
     /// Curated from the Touareg 7L scan profile, with the two address aliases confirmed
     /// by the supplied Cayenne traces and the Cayenne MOST gateway added separately.
+    /// Blocks that reliably answered on this car (0x01 двигатель, 0x1C раздатка,
+    /// 0x34 пневмоподвеска, 0x68 стеклоочистители) are always on the errors screen
+    /// and are no longer probed here.
     static let cayenne955: [BlockScanTarget] = [
-        .init(address: 0x01, title: "Двигатель", fastInitTargets: [0x10, 0x01]),
         .init(address: 0x02, title: "АКПП Tiptronic"),
         .init(address: 0x03, title: "ABS / ESP (PSM)"),
         .init(address: 0x05, title: "KESSY · доступ и запуск"),
@@ -184,11 +192,9 @@ struct BlockScanTarget: Identifiable, Hashable {
         .init(address: 0x17, title: "Приборная панель", fastInitTargets: [0x61, 0x17]),
         .init(address: 0x18, title: "Дополнительный отопитель"),
         .init(address: 0x19, title: "CAN-шлюз"),
-        .init(address: 0x1C, title: "Раздаточная коробка (VTG) · по трассе Cayenne"),
         .init(address: 0x22, title: "Раздаточная коробка / AWD"),
         .init(address: 0x29, title: "Левая фара"),
         .init(address: 0x32, title: "Блокировка дифференциала"),
-        .init(address: 0x34, title: "Пневмоподвеска / регулировка уровня"),
         .init(address: 0x36, title: "Память водительского сиденья"),
         .init(address: 0x37, title: "Навигация / PCM"),
         .init(address: 0x39, title: "Правая фара"),
@@ -200,7 +206,6 @@ struct BlockScanTarget: Identifiable, Hashable {
         .init(address: 0x57, title: "ТВ-тюнер"),
         .init(address: 0x64, title: "Датчик угла поворота руля"),
         .init(address: 0x65, title: "Контроль давления шин"),
-        .init(address: 0x68, title: "Стеклоочистители"),
         .init(address: 0x69, title: "Фаркоп / прицеп"),
         .init(address: 0x6C, title: "Камера заднего вида"),
         .init(address: 0x6D, title: "Электропривод задней двери"),

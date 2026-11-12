@@ -231,7 +231,7 @@ final class Elm {
         tp20Channel = nil
         _ = try cmd("ATPC")
         Thread.sleep(forTimeInterval: 0.15)   // let the K-line go idle before the next init
-        for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATST64"] {
+        for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATSTFF"] {
             _ = try cmd(command)
         }
     }
@@ -413,13 +413,13 @@ final class Elm {
         tp20Channel = nil
         _ = try cmd("ATPC")
         Thread.sleep(forTimeInterval: 0.15)   // let the K-line go idle before the next init
-        for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATST64", "ATCRA"] {
+        for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATSTFF", "ATCRA"] {
             _ = try cmd(command)
         }
     }
 
     private func restoreKwpMode() {
-        for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATST64", "ATCRA"] {
+        for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATSTFF", "ATCRA"] {
             _ = try? cmd(command)
         }
     }

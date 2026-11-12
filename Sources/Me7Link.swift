@@ -38,7 +38,9 @@ private struct MAFPairReading {
 }
 
 /// ATAL: K-line messages longer than 7 data bytes (0x21 block, DTC list).
-private let baseSetup = ["ATE0", "ATL0", "ATS0", "ATH0", "ATAL", "ATAT1", "ATST64", "ATKW0"]
+/// ATST FF: wait up to ~1 s for a reply (default 0x64 ≈ 400 ms cuts off slow KWP ECUs:
+/// in the traces a silent address was declared NO DATA already after ~613 ms).
+private let baseSetup = ["ATE0", "ATL0", "ATS0", "ATH0", "ATAL", "ATAT1", "ATSTFF", "ATKW0"]
 
 /// ME7 over ELM327 K-line, in three separate steps so it is clear which one fails:
 ///  1. connectElm  TCP to the Wi-Fi adapter + AT setup
@@ -493,7 +495,7 @@ final class Me7Link: ObservableObject {
         let pending = targets.filter { previousByAddress[$0.address]?.responded != true }
         let skipped = targets.count - pending.count
         let plannedChecks = pending.reduce(0) { count, target in
-            count + (target.address == 0x01 ? 1 : 0) + target.fastInitTargets.count + 1
+            count + target.fastInitTargets.count + 1
         }
         ui {
             self.blockScanState = .busy
@@ -531,14 +533,14 @@ final class Me7Link: ObservableObject {
             var results = targets.map { previousByAddress[$0.address] ?? BlockScanResult(target: $0) }
             self.t("Кандидатов адресов: \(targets.count); к опросу: \(pending.count); пропущено как уже найденные: \(skipped); проверок транспорта и сценариев подключения: \(total)")
             self.t("Адреса: \(targets.map { "0x\($0.addressText) \($0.title)" }.joined(separator: "; "))")
-            self.t("Проверки только читающие: KWP2000 по K-line (fast init и slow init 5 бод) — на Cayenne 955 все блоки отвечают именно так. Ошибки не стираются, кодирование и исполнительные тесты не запускаются. Адрес, ответивший хотя бы раз, из дальнейших проверок убирается.")
+            self.t("Проверки только читающие: KWP2000 по K-line (fast init и slow init 5 бод), ожидание ответа до ~1 с, молчащим блокам запрос повторяется. Ошибки не стираются, кодирование и исполнительные тесты не запускаются. Адрес, ответивший хотя бы раз, из дальнейших проверок убирается.")
 
             for index in targets.indices {
                 if self.shouldStopBlockScan { break }
                 let target = targets[index]
                 let alreadyResponded = previousByAddress[target.address]?.responded == true
                 let plannedForTarget = alreadyResponded ? 0
-                    : (target.address == 0x01 ? 1 : 0) + target.fastInitTargets.count + 1
+                    : target.fastInitTargets.count + 1
                 let progressBeforeTarget = progress
                 if alreadyResponded {
                     self.t("=== адрес 0x\(target.addressText): \(target.title) — уже отвечал в этом подключении, пропускаю ===")
@@ -585,12 +587,6 @@ final class Me7Link: ObservableObject {
                 }
 
                 var answered = false
-                if target.address == 0x01 {
-                    answered = try record("Сценарий главного экрана · подключение двигателя") {
-                        try self.probeMainEngineConnection(e, s)
-                    } == .responded
-                }
-
                 for physicalAddress in target.fastInitTargets where !answered {
                     let physicalText = String(format: "%02X", physicalAddress)
                     let mode = "KWP fast init · физический адрес 0x\(physicalText)"
@@ -676,30 +672,37 @@ final class Me7Link: ObservableObject {
 
         func readIdentity(_ identifier: String) throws -> String? {
             if busDead { return nil }
-            let frames = try e.requestFramesForBlockScan(identifier, timeout: 6)
-            if busInitFailed(frames) {
-                busDead = true
-                observations.append("\(identifier): инициализация K-line не удалась, блок молчит; остальные проверки адреса пропущены")
-                return nil
-            }
-            if frames.isEmpty { observations.append("\(identifier): нет ответа") }
-            for frame in frames {
-                t("Проба KWP \(identifier): \(frame)")
-                observations.append("\(identifier): \(frame)")
-                guard frame.isPositive(0x1A), frame.bytes.count > 2,
-                      frame.bytes[1] == (identifier == "1A9B" ? 0x9B : 0x91) else {
-                    if frame.negative, frame.bytes[2] != 0x78 { negativeResponses.append(frame) }
-                    continue
+            for attempt in 1...2 {
+                let frames = try e.requestFramesForBlockScan(identifier, timeout: 6)
+                if busInitFailed(frames) {
+                    busDead = true
+                    observations.append("\(identifier): инициализация K-line не удалась, блок молчит; остальные проверки адреса пропущены")
+                    return nil
                 }
-                let identity = Dtc.identificationText(Array(frame.bytes.dropFirst(2)))
-                let generic = identity.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "HARDWARE NO"
-                    || identity == "Ответ пустой"
-                if generic {
-                    sawUnverifiedResponse = true
-                    observations.append("\(identifier): получен только общий Hardware No, номер блока не подтверждён")
-                } else {
-                    return "\(identifier) → \(identity)"
+                if frames.isEmpty { observations.append("\(identifier): нет ответа") }
+                for frame in frames {
+                    t("Проба KWP \(identifier): \(frame)")
+                    observations.append("\(identifier): \(frame)")
+                    guard frame.isPositive(0x1A), frame.bytes.count > 2,
+                          frame.bytes[1] == (identifier == "1A9B" ? 0x9B : 0x91) else {
+                        if frame.negative, frame.bytes[2] != 0x78 { negativeResponses.append(frame) }
+                        continue
+                    }
+                    let identity = Dtc.identificationText(Array(frame.bytes.dropFirst(2)))
+                    let generic = identity.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == "HARDWARE NO"
+                        || identity == "Ответ пустой"
+                    if generic {
+                        sawUnverifiedResponse = true
+                        observations.append("\(identifier): получен только общий Hardware No, номер блока не подтверждён")
+                    } else {
+                        return "\(identifier) → \(identity)"
+                    }
                 }
+                // A block that stays completely silent (only NO DATA) right after a successful
+                // init may simply be slow to wake up; give the same request a second chance.
+                if frames.contains(where: { $0.ok }) || attempt == 2 { return nil }
+                t("Проба KWP \(identifier): блок молчит после инициализации, повторяю запрос через 0.7 с")
+                Thread.sleep(forTimeInterval: 0.7)
             }
             return nil
         }
@@ -747,60 +750,14 @@ final class Me7Link: ObservableObject {
         if sawUnverifiedResponse {
             return (nil, nil, .unverifiedResponse, "ECU откликнулся, но номер блока не подтвердился: \(observations.joined(separator: "; "))")
         }
-        return (nil, nil, .noResponse, observations.joined(separator: "; "))
-    }
-
-    /// Repeat the exact engine link fallback used by the main screen, but keep scanner state isolated.
-    private func probeMainEngineConnection(_ e: Elm, _ s: Settings) throws -> BlockScanAttempt {
-        var links = [Link(proto: s.proto, initAddress: s.initAddress, header: s.header)]
-        for link in [Link(proto: "5", initAddress: "", header: "8110F1"), Link(proto: "5", initAddress: "", header: "8101F1")]
-        where !links.contains(where: { $0.proto == link.proto && $0.header == link.header }) {
-            links.append(link)
+        var detail = observations.joined(separator: "; ")
+        if !busDead {
+            // The 5-baud/fast init handshake completed, so something is alive at this address,
+            // yet every KWP2000 request timed out — the classic signature of an older VAG
+            // KWP1281 block (the "Вася"/VCDS protocol), which an ELM327 cannot speak.
+            detail += "; инициализация прошла, но KWP2000-запросы без ответа — похоже на блок KWP1281 (протокол VCDS): через ELM327 он не читается, нужен KKL-адаптер"
         }
-        var failures: [String] = []
-        for link in links {
-            t("Сценарий главного экрана двигателя: \(link.label), заголовок \(link.header)")
-            try e.prepareKwpMode()
-            _ = try e.cmd("ATSP\(link.proto)")
-            if link.proto == "3" || link.proto == "4" { _ = try e.cmd("ATIIA\(link.initAddress)") }
-            _ = try e.cmd("ATSH\(link.header)")
-            _ = try e.cmd("ATWM\(link.header)3E")
-            let (session, reason) = try startSession(e, s)
-            guard let session else {
-                failures.append("\(link.label): \(reason)")
-                continue
-            }
-
-            var software: String?
-            for identifier in ["1A9B", "1A91"] {
-                let frames = try e.requestFramesForBlockScan(identifier, timeout: 2)
-                for response in frames {
-                    t("Идентификация двигателя \(identifier): \(response)")
-                    guard response.isPositive(0x1A), response.bytes.count > 2 else { continue }
-                    let value = Dtc.identificationText(Array(response.bytes.dropFirst(2)))
-                    if value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() != "HARDWARE NO",
-                       value != "Ответ пустой" {
-                        software = "\(identifier) · \(value)"
-                        break
-                    }
-                }
-                if software != nil { break }
-            }
-            workingLinks[.engine] = link
-            _ = try? e.request("1082", timeout: 1)   // close the probe session politely
-            return BlockScanAttempt(
-                mode: "Сценарий главного экрана · подключение двигателя",
-                state: software == nil ? .unverifiedResponse : .responded,
-                detail: software.map {
-                    "Соединение двигателя подтверждено: \(link.label), сеанс \(session); идентификатор: \($0)"
-                } ?? "Двигатель принял сеанс по сценарию главного экрана (\(link.label)), но номер блока не получен"
-            )
-        }
-        return BlockScanAttempt(
-            mode: "Сценарий главного экрана · подключение двигателя",
-            state: .noResponse,
-            detail: failures.joined(separator: "; ")
-        )
+        return (nil, nil, .noResponse, detail)
     }
 
     private func moduleConnectionFail(_ module: DtcModule, _ message: String) {
