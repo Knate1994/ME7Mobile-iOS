@@ -353,6 +353,33 @@ final class Me7Link: ObservableObject {
         var label: String { proto == "5" ? "fast init \(header.dropFirst(2).prefix(2))" : "5 бод 0x\(initAddress)" }
     }
 
+    /// One link variant with retries: the cheap ELM clone regularly flunks the 5-baud init
+    /// (BUS INIT: ...OK followed by silence, or BUS INIT: ERROR), so a failing variant is
+    /// re-attempted after ATPC + a pause instead of being written off on the first try.
+    /// Returns (accepted session, "") or (nil, short reason of the last failure).
+    private func openLink(_ e: Elm, _ link: Link, sessions: [String], slowAttempts: Int) throws -> (String?, String) {
+        let attempts = link.proto == "5" ? 2 : max(1, slowAttempts)
+        var lastError = "нет ответа"
+        for attempt in 1...attempts {
+            t(attempts > 1
+                ? "--- попытка \(attempt)/\(attempts): \(link.label), заголовок \(link.header) ---"
+                : "--- попытка: \(link.label), заголовок \(link.header) ---")
+            try e.prepareKwpMode()
+            _ = try e.cmd("ATSP\(link.proto)")
+            if link.proto == "3" || link.proto == "4" { _ = try e.cmd("ATIIA\(link.initAddress)") }
+            _ = try e.cmd("ATSH\(link.header)")
+            _ = try e.cmd("ATWM\(link.header)3E")
+            let (session, error) = try startSession(e, sessions)
+            if let session = session { return (session, "") }
+            lastError = error
+            if attempt < attempts {
+                _ = try e.cmd("ATPC")
+                Thread.sleep(forTimeInterval: 0.8)
+            }
+        }
+        return (nil, lastError)
+    }
+
     /// User settings first, then fast init variants (kai.ecu alternative: FAST-0x10).
     func connectEcu(_ s: Settings) {
         job({ self.ecuFail($0) }) {
@@ -380,16 +407,12 @@ final class Me7Link: ObservableObject {
             links.removeAll { $0.proto == known.proto && $0.initAddress == known.initAddress && $0.header == known.header }
             links.insert(known, at: 0)
         }
+        let sessions = s.sessions.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         var results: [String] = []
         for link in links {
             setEcu(.busy, (["Инициализация: \(link.label)…"] + results).joined(separator: "\n"))
-            t("--- попытка: \(link.label), заголовок \(link.header) ---")
-            try e.prepareKwpMode()
-            _ = try e.cmd("ATSP\(link.proto)")
-            if link.proto == "3" || link.proto == "4" { _ = try e.cmd("ATIIA\(link.initAddress)") }
-            _ = try e.cmd("ATSH\(link.header)")
-            _ = try e.cmd("ATWM\(link.header)3E")
-            let (session, error) = try startSession(e, s)
+            // The engine answers fast init reliably on this car, so slow-init retries stay few.
+            let (session, error) = try openLink(e, link, sessions: sessions, slowAttempts: 2)
             if let session = session {
                 ecuOk = true
                 activeModule = .engine
@@ -444,13 +467,9 @@ final class Me7Link: ObservableObject {
         }
         var failures: [String] = []
         for link in links {
-            t("--- \(link.label), заголовок \(link.header) ---")
-            try e.prepareKwpMode()
-            _ = try e.cmd("ATSP\(link.proto)")
-            if link.proto == "3" || link.proto == "4" { _ = try e.cmd("ATIIA\(link.initAddress)") }
-            _ = try e.cmd("ATSH\(link.header)")
-            _ = try e.cmd("ATWM\(link.header)3E")
-            let (session, error) = try startSession(e, module.sessions)
+            // The clone often needs several 5-baud attempts before the init sticks
+            // (Вася/VCDS proves these blocks answer on the very same K-line).
+            let (session, error) = try openLink(e, link, sessions: module.sessions, slowAttempts: 5)
             if let session = session {
                 activeModule = module
                 workingLinks[module] = link
@@ -462,7 +481,6 @@ final class Me7Link: ObservableObject {
                 return true
             }
             failures.append("\(link.label): \(error)")
-            _ = try e.cmd("ATPC")
         }
 
         var message = failures.joined(separator: "\n")
@@ -533,7 +551,7 @@ final class Me7Link: ObservableObject {
             var results = targets.map { previousByAddress[$0.address] ?? BlockScanResult(target: $0) }
             self.t("Кандидатов адресов: \(targets.count); к опросу: \(pending.count); пропущено как уже найденные: \(skipped); проверок транспорта и сценариев подключения: \(total)")
             self.t("Адреса: \(targets.map { "0x\($0.addressText) \($0.title)" }.joined(separator: "; "))")
-            self.t("Проверки только читающие: KWP2000 по K-line (fast init и slow init 5 бод), ожидание ответа до ~1 с, молчащим блокам запрос повторяется. Ошибки не стираются, кодирование и исполнительные тесты не запускаются. Адрес, ответивший хотя бы раз, из дальнейших проверок убирается.")
+            self.t("Проверки только читающие: KWP2000 по K-line (fast init и slow init 5 бод), ожидание ответа до ~1 с, молчащим блокам запрос повторяется, а нестабильная 5-бод инициализация клона ELM перезапускается до 3 раз. Ошибки не стираются, кодирование и исполнительные тесты не запускаются. Адрес, ответивший хотя бы раз, из дальнейших проверок убирается.")
 
             for index in targets.indices {
                 if self.shouldStopBlockScan { break }
@@ -589,14 +607,23 @@ final class Me7Link: ObservableObject {
                 var answered = false
                 for physicalAddress in target.fastInitTargets where !answered {
                     let physicalText = String(format: "%02X", physicalAddress)
+                    let header = "81\(physicalText)F1"
                     let mode = "KWP fast init · физический адрес 0x\(physicalText)"
                     answered = try record(mode) {
-                        try e.prepareBlockScanKwpMode()
-                        _ = try e.cmd("ATSP5")
-                        let header = "81\(physicalText)F1"
-                        _ = try e.cmd("ATSH\(header)")
-                        _ = try e.cmd("ATWM\(header)3E")
-                        let probe = try self.probeBlockKwp(e)
+                        var probe: (response: Response?, negativeResponse: Response?, state: BlockScanAttemptState, detail: String)!
+                        for fastAttempt in 1...2 {
+                            try e.prepareBlockScanKwpMode()
+                            _ = try e.cmd("ATSP5")
+                            _ = try e.cmd("ATSH\(header)")
+                            _ = try e.cmd("ATWM\(header)3E")
+                            probe = try self.probeBlockKwp(e)
+                            if probe.state != .noResponse { break }
+                            if fastAttempt < 2, !self.shouldStopBlockScan {
+                                self.t("Проба 0x\(physicalText): блок молчит после fast init, повторяю (попытка 2/2)")
+                                _ = try e.cmd("ATPC")
+                                Thread.sleep(forTimeInterval: 0.5)
+                            }
+                        }
                         if probe.state == .responded, let module = DtcModule.module(forAddress: target.address) {
                             self.workingLinks[module] = Link(proto: "5", initAddress: "", header: header)
                         }
@@ -605,14 +632,23 @@ final class Me7Link: ObservableObject {
                 }
 
                 if !answered {
+                    let header = "81\(target.addressText)F1"
                     answered = try record("KWP slow init · K-Line 5 бод") {
-                        try e.prepareBlockScanKwpMode()
-                        _ = try e.cmd("ATSP4")
-                        _ = try e.cmd("ATIIA\(target.addressText)")
-                        let header = "81\(target.addressText)F1"
-                        _ = try e.cmd("ATSH\(header)")
-                        _ = try e.cmd("ATWM\(header)3E")
-                        let probe = try self.probeBlockKwp(e)
+                        var probe: (response: Response?, negativeResponse: Response?, state: BlockScanAttemptState, detail: String)!
+                        for slowAttempt in 1...3 {
+                            try e.prepareBlockScanKwpMode()
+                            _ = try e.cmd("ATSP4")
+                            _ = try e.cmd("ATIIA\(target.addressText)")
+                            _ = try e.cmd("ATSH\(header)")
+                            _ = try e.cmd("ATWM\(header)3E")
+                            probe = try self.probeBlockKwp(e)
+                            if probe.state != .noResponse { break }
+                            if slowAttempt < 3, !self.shouldStopBlockScan {
+                                self.t("Повтор slow init 0x\(target.addressText) (попытка \(slowAttempt + 1)/3) — клон ELM нестабилен на 5-бод инициализации")
+                                _ = try e.cmd("ATPC")
+                                Thread.sleep(forTimeInterval: 0.8)
+                            }
+                        }
                         if probe.state == .responded, let module = DtcModule.module(forAddress: target.address) {
                             self.workingLinks[module] = Link(proto: "4", initAddress: target.addressText, header: header)
                         }
@@ -752,10 +788,12 @@ final class Me7Link: ObservableObject {
         }
         var detail = observations.joined(separator: "; ")
         if !busDead {
-            // The 5-baud/fast init handshake completed, so something is alive at this address,
-            // yet every KWP2000 request timed out — the classic signature of an older VAG
-            // KWP1281 block (the "Вася"/VCDS protocol), which an ELM327 cannot speak.
-            detail += "; инициализация прошла, но KWP2000-запросы без ответа — похоже на блок KWP1281 (протокол VCDS): через ELM327 он не читается, нужен KKL-адаптер"
+            // The init handshake completed, so something may be alive at this address, yet every
+            // KWP2000 request timed out. Two realistic causes: an older VAG KWP1281 block (the
+            // "Вася"/VCDS protocol, which an ELM327 cannot speak), or the ELM clone dropping the
+            // exchange right after its flaky 5-baud init. The scan retries the init several times;
+            // if the address stays silent anyway, only VCDS/Вася tells the two causes apart.
+            detail += "; инициализация прошла, но KWP2000-запросы без ответа — это либо блок KWP1281 (протокол VCDS: через ELM327 не читается, нужен KKL-адаптер), либо клон ELM потерял обмен после 5-бод инициализации; точно различает Вася/VCDS (например, АКПП 0x02 по Васе подтверждённо KWP2000)"
         }
         return (nil, nil, .noResponse, detail)
     }
@@ -801,11 +839,6 @@ final class Me7Link: ObservableObject {
     }
 
     /// Returns (accepted session, "") or (nil, short reason of the last failure).
-    private func startSession(_ e: Elm, _ s: Settings) throws -> (String?, String) {
-        let list = s.sessions.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        return try startSession(e, list)
-    }
-
     private func startSession(_ e: Elm, _ list: [String]) throws -> (String?, String) {
         var reason = "нет ответа"
         for sess in list {
