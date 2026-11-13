@@ -343,7 +343,6 @@ private struct DtcCard: View {
 struct BlockScanView: View {
     @ObservedObject var link: Me7Link
     let makeSettings: () -> Settings
-    @AppStorage("blockScanBridgeState") private var bridgeState = "Не указано"
     @State private var showingTraceShare = false
 
     private var scanning: Bool { link.blockScanState == .busy }
@@ -366,8 +365,8 @@ struct BlockScanView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 explanationCard
-                bridgeCard
                 scanButton
+                sweepCard
 
                 if link.blockScanTotal > 0 {
                     progressCard
@@ -406,10 +405,7 @@ struct BlockScanView: View {
                 TraceShareSheet(items: [url])
             }
         }
-        .onAppear { link.noteBlockScanScreenOpened(bridgeState: bridgeState) }
-        .onChange(of: bridgeState) { newValue in
-            link.noteBlockScanBridgeStateChanged(newValue)
-        }
+        .onAppear { link.noteBlockScanScreenOpened() }
     }
 
     private var explanationCard: some View {
@@ -421,7 +417,7 @@ struct BlockScanView: View {
                 .font(.subheadline)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Положительный ответ на запрос сеанса сам по себе не считается найденным блоком: для зелёного результата нужен читаемый идентификатор. Все блоки Cayenne 955 опрашиваются по K-line (KWP2000), как это делает «Вася диагност». Опрос только читает ответы и не стирает ошибки, не кодирует блоки и не запускает исполнительные механизмы. Полная трасса сохраняет команды, ответы, таймауты и итоги.")
+            Text("Положительный ответ на запрос сеанса сам по себе не считается найденным блоком: для зелёного результата нужен читаемый идентификатор. Блоки опрашиваются всеми путями, которые используют «Вася диагност» и Abrites: KWP2000 по K-line (fast init, 5-бод 10400 и 9600) и VW TP2.0/TP1.6 по CAN. Опрос только читает ответы и не стирает ошибки, не кодирует блоки и не запускает исполнительные механизмы. Полная трасса сохраняет команды, ответы, таймауты и итоги.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -431,33 +427,13 @@ struct BlockScanView: View {
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 17, style: .continuous))
     }
 
-    private var bridgeCard: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Label("Перемычка OBD 3–7", systemImage: "cable.connector")
-                .font(.system(size: 14, weight: .semibold))
-            Picker("Состояние перемычки", selection: $bridgeState) {
-                Text("Не указано").tag("Не указано")
-                Text("Разомкнута").tag("Разомкнута")
-                Text("Замкнута").tag("Замкнута")
-            }
-            .pickerStyle(.segmented)
-            Text("Приложение не видит тумблер физически. Если переключишь его во время опроса, сразу отметь новое положение здесь — отметка попадёт в трассу.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
     @ViewBuilder
     private var scanButton: some View {
         Button {
             if scanning {
                 link.stopBlockScan()
             } else {
-                link.scanAllBlocks(makeSettings(), bridgeState: bridgeState)
+                link.scanAllBlocks(makeSettings())
             }
         } label: {
             HStack(spacing: 10) {
@@ -485,6 +461,43 @@ struct BlockScanView: View {
                 .font(.footnote)
                 .foregroundStyle(.orange)
         }
+    }
+
+    private var sweepCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Глубокий поиск адресов", systemImage: "scope")
+                .font(.system(size: 14, weight: .semibold))
+            Text("Fast init startCommunication по каждому физическому адресу 0x01–0x7F (~3 мин). Так на этом Cayenne нашлись двигатель (0x10) и приборка (0x61): если блок сидит на нестандартном адресе, он ответит здесь. Только чтение идентификатора.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                link.sweepFastInitAddresses(makeSettings())
+            } label: {
+                Text("Найти все отвечающие адреса")
+                    .font(.system(size: 14, weight: .bold))
+                    .frame(maxWidth: .infinity, minHeight: 40)
+                    .foregroundStyle(.white)
+                    .background(Color.indigo, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(link.elmState != .ok || scanning)
+            Text(link.sweepStatus)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !link.sweepFound.isEmpty {
+                ForEach(link.sweepFound, id: \.self) { line in
+                    Text(line)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.green)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private var progressCard: some View {

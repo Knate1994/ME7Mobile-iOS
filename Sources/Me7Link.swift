@@ -65,6 +65,8 @@ final class Me7Link: ObservableObject {
     @Published var blockScanProgress = 0
     @Published var blockScanTotal = 0
     @Published var blockScanResults: [BlockScanResult] = []
+    @Published var sweepStatus = "Глубокий поиск ещё не запускался"
+    @Published var sweepFound: [String] = []
     /// Blocks that provably answered during this ELM connection (scan or direct connect).
     /// Shown on the errors screen next to the four base modules.
     @Published var discovered: Set<DtcModule> = []
@@ -92,7 +94,6 @@ final class Me7Link: ObservableObject {
     private var clearAllIsQueuedOrRunning = false
     private var blockScanIsQueuedOrRunning = false
     private var blockScanStopRequested = false
-    private var blockScanBridgeState = "Не указано"
     private var runFlag = false
     private var running: Bool {
         get { flagLock.lock(); defer { flagLock.unlock() }; return runFlag }
@@ -159,17 +160,6 @@ final class Me7Link: ObservableObject {
         return found.isEmpty ? DtcModule.allCases.filter(\.isBase) : found
     }
 
-    private var currentBlockScanBridgeState: String {
-        blockScanLock.lock()
-        defer { blockScanLock.unlock() }
-        return blockScanBridgeState
-    }
-
-    private func setBlockScanBridgeState(_ state: String) {
-        blockScanLock.lock()
-        blockScanBridgeState = state
-        blockScanLock.unlock()
-    }
     private func updateModule(_ module: DtcModule, _ change: @escaping (inout ModuleDiagnostic) -> Void) {
         ui {
             var value = self.moduleDiagnostics[module] ?? ModuleDiagnostic()
@@ -347,10 +337,22 @@ final class Me7Link: ObservableObject {
 
     /// How the ELM wakes up the ECU: protocol 3/4 = 5-baud init to initAddress, 5 = fast init (target taken from header).
     private struct Link {
+        /// "5" = KWP fast init; "4" = 5-бод 10400, неявный init первым запросом;
+        /// "4A" = 5-бод 10400 с явным ATSI; "4L" = 5-бод 9600 (ATIB96);
+        /// "T20"/"T16" = VW TP2.0/TP1.6 по CAN (как Abrites/PoCOM для Cayenne 95x).
         let proto: String
         let initAddress: String
         let header: String
-        var label: String { proto == "5" ? "fast init \(header.dropFirst(2).prefix(2))" : "5 бод 0x\(initAddress)" }
+        var label: String {
+            switch proto {
+            case "5": return "fast init \(header.dropFirst(2).prefix(2))"
+            case "4A": return "5 бод 0x\(initAddress) · явный ATSI"
+            case "4L": return "5 бод 0x\(initAddress) · 9600 бод"
+            case "T20": return "VW TP2.0 · CAN · 0x\(initAddress)"
+            case "T16": return "VW TP1.6 · CAN · 0x\(initAddress)"
+            default: return "5 бод 0x\(initAddress)"
+            }
+        }
     }
 
     /// One link variant with retries: the cheap ELM clone regularly flunks the 5-baud init
@@ -358,17 +360,51 @@ final class Me7Link: ObservableObject {
     /// re-attempted after ATPC + a pause instead of being written off on the first try.
     /// Returns (accepted session, "") or (nil, short reason of the last failure).
     private func openLink(_ e: Elm, _ link: Link, sessions: [String], slowAttempts: Int) throws -> (String?, String) {
-        let attempts = link.proto == "5" ? 2 : max(1, slowAttempts)
+        let attempts: Int
+        switch link.proto {
+        case "5": attempts = 2
+        case "4A", "4L": attempts = min(2, max(1, slowAttempts))
+        case "T20", "T16": attempts = 1
+        default: attempts = max(1, slowAttempts)
+        }
         var lastError = "нет ответа"
         for attempt in 1...attempts {
             t(attempts > 1
                 ? "--- попытка \(attempt)/\(attempts): \(link.label), заголовок \(link.header) ---"
                 : "--- попытка: \(link.label), заголовок \(link.header) ---")
+            if link.proto == "T20" || link.proto == "T16" {
+                guard let target = Int(link.initAddress, radix: 16) else { return (nil, "некорректный адрес TP") }
+                let opened = link.proto == "T20" ? try e.connectTP20(target: target) : try e.connectTP16(target: target)
+                guard opened.connected else {
+                    lastError = opened.reason
+                    continue
+                }
+                let (session, error) = try startSession(e, sessions)
+                if let session = session { return (session, "") }
+                lastError = error
+                e.disconnectTP16()
+                continue
+            }
             try e.prepareKwpMode()
-            _ = try e.cmd("ATSP\(link.proto)")
-            if link.proto == "3" || link.proto == "4" { _ = try e.cmd("ATIIA\(link.initAddress)") }
+            _ = try e.cmd("ATSP\(link.proto.prefix(1))")
+            if link.proto.hasPrefix("4") { _ = try e.cmd("ATIIA\(link.initAddress)") }
+            if link.proto == "4L" { _ = try e.cmd("ATIB96") }   // 9600 бод: часть блоков Cayenne живёт на нём (Abrites перебирает 10427/9600)
             _ = try e.cmd("ATSH\(link.header)")
             _ = try e.cmd("ATWM\(link.header)3E")
+            if link.proto == "4A" {
+                // Явная 5-бод инициализация: на части клонов ATSI проходит стабильнее,
+                // чем неявный init на первом кадре данных.
+                let initReply = try e.cmd("ATSI", timeout: 10)
+                let upper = initReply.uppercased()
+                guard upper.contains("BUS INIT"), upper.contains("OK"), !upper.contains("ERROR") else {
+                    lastError = "ATSI: \(initReply.isEmpty ? "нет ответа" : initReply)"
+                    if attempt < attempts {
+                        _ = try e.cmd("ATPC")
+                        Thread.sleep(forTimeInterval: 0.8)
+                    }
+                    continue
+                }
+            }
             let (session, error) = try startSession(e, sessions)
             if let session = session { return (session, "") }
             lastError = error
@@ -399,7 +435,11 @@ final class Me7Link: ObservableObject {
         setEcu(.busy, "Инициализация блока…")
         t("=== ЭБУ ===")
         var links = [Link(proto: s.proto, initAddress: s.initAddress, header: s.header)]
-        for link in [Link(proto: "5", initAddress: "", header: "8110F1"), Link(proto: "5", initAddress: "", header: "8101F1")]
+        for link in [Link(proto: "5", initAddress: "", header: "8110F1"),
+                     Link(proto: "5", initAddress: "", header: "8101F1"),
+                     // Abrites перебирает для ME7.x 5-бод адреса 0x01 и 0x11 — добавляем оба как запасной путь
+                     Link(proto: "4", initAddress: "01", header: "8101F1"),
+                     Link(proto: "4", initAddress: "11", header: "8111F1")]
         where !links.contains(where: { $0.proto == link.proto && $0.header == link.header }) {
             links.append(link)
         }
@@ -461,6 +501,10 @@ final class Me7Link: ObservableObject {
         let target = module.target
         var links = module.fastInitTargets.map { Link(proto: "5", initAddress: "", header: "81\(hx($0))F1") }
         links.append(Link(proto: "4", initAddress: target, header: "81\(target)F1"))
+        links.append(Link(proto: "4A", initAddress: target, header: "81\(target)F1"))
+        links.append(Link(proto: "4L", initAddress: target, header: "81\(target)F1"))
+        links.append(Link(proto: "T20", initAddress: target, header: ""))
+        links.append(Link(proto: "T16", initAddress: target, header: ""))
         if let known = workingLinks[module] {
             links.removeAll { $0.proto == known.proto && $0.initAddress == known.initAddress && $0.header == known.header }
             links.insert(known, at: 0)
@@ -492,20 +536,12 @@ final class Me7Link: ObservableObject {
 
     /// Probe the known Cayenne 955/VAG address table over each transport supported by this ELM path.
     /// No DTC erase, coding, actuator or write service is sent; only identification and session probes.
-    func noteBlockScanScreenOpened(bridgeState: String) {
-        setBlockScanBridgeState(bridgeState)
-        t("=== открыт экран теста блоков; перемычка 3–7 отмечена как: \(bridgeState) ===")
+    func noteBlockScanScreenOpened() {
+        t("=== открыт экран теста блоков ===")
     }
 
-    func noteBlockScanBridgeStateChanged(_ state: String) {
-        setBlockScanBridgeState(state)
-        t("=== пользователь отметил новое положение перемычки 3–7: \(state) ===")
-        flushTraceFile()
-    }
-
-    func scanAllBlocks(_ s: Settings, bridgeState: String) {
+    func scanAllBlocks(_ s: Settings) {
         guard beginBlockScan() else { return }
-        setBlockScanBridgeState(bridgeState)
         let targets = BlockScanTarget.cayenne955
         // Blocks that already answered during this ELM connection are kept as-is and
         // skipped: re-probing them wastes minutes and can disturb open sessions.
@@ -513,7 +549,7 @@ final class Me7Link: ObservableObject {
         let pending = targets.filter { previousByAddress[$0.address]?.responded != true }
         let skipped = targets.count - pending.count
         let plannedChecks = pending.reduce(0) { count, target in
-            count + target.fastInitTargets.count + 1
+            count + target.fastInitTargets.count + 3
         }
         ui {
             self.blockScanState = .busy
@@ -531,7 +567,6 @@ final class Me7Link: ObservableObject {
             defer { self.endBlockScan() }
             self.t("=== ТЕСТ БЛОКОВ · профиль адресов Touareg 7L / проверяемый автомобиль Cayenne 955 ===")
             self.t("ELM: \(s.host):\(s.port)")
-            self.t("Перемычка OBD 3–7 по отметке пользователя: \(bridgeState)")
             guard let e = self.elm else {
                 self.t("Опрос не начат: нет активного соединения ELM327")
                 self.flushTraceFile()
@@ -551,14 +586,14 @@ final class Me7Link: ObservableObject {
             var results = targets.map { previousByAddress[$0.address] ?? BlockScanResult(target: $0) }
             self.t("Кандидатов адресов: \(targets.count); к опросу: \(pending.count); пропущено как уже найденные: \(skipped); проверок транспорта и сценариев подключения: \(total)")
             self.t("Адреса: \(targets.map { "0x\($0.addressText) \($0.title)" }.joined(separator: "; "))")
-            self.t("Проверки только читающие: KWP2000 по K-line (fast init и slow init 5 бод), ожидание ответа до ~1 с, молчащим блокам запрос повторяется, а нестабильная 5-бод инициализация клона ELM перезапускается до 3 раз. Ошибки не стираются, кодирование и исполнительные тесты не запускаются. Адрес, ответивший хотя бы раз, из дальнейших проверок убирается.")
+            self.t("Проверки только читающие: KWP2000 по K-line (fast init, 5-бод 10400 с повторами, 5-бод 9600), затем VW TP2.0/TP1.6 по CAN — набор путей как у Abrites/PoCOM. Ошибки не стираются, кодирование и исполнительные тесты не запускаются. Адрес, ответивший хотя бы раз, из дальнейших проверок убирается.")
 
             for index in targets.indices {
                 if self.shouldStopBlockScan { break }
                 let target = targets[index]
                 let alreadyResponded = previousByAddress[target.address]?.responded == true
                 let plannedForTarget = alreadyResponded ? 0
-                    : target.fastInitTargets.count + 1
+                    : target.fastInitTargets.count + 3
                 let progressBeforeTarget = progress
                 if alreadyResponded {
                     self.t("=== адрес 0x\(target.addressText): \(target.title) — уже отвечал в этом подключении, пропускаю ===")
@@ -578,7 +613,7 @@ final class Me7Link: ObservableObject {
                         self.blockScanProgress = currentProgress
                         self.blockScanStatus = currentStatus
                     }
-                    self.t("--- ПРОБА \(label), адрес 0x\(target.addressText); перемычка отмечена как: \(self.currentBlockScanBridgeState) ---")
+                    self.t("--- ПРОБА \(label), адрес 0x\(target.addressText) ---")
                     let attempt = try run()
                     results[index].attempts.append(attempt)
                     let stateText: String
@@ -656,6 +691,54 @@ final class Me7Link: ObservableObject {
                     } == .responded
                 }
 
+                if !answered {
+                    let header = "81\(target.addressText)F1"
+                    answered = try record("KWP slow init · 5 бод · 9600 бод") {
+                        // Abrites перебирает 10427 и 9600 бод: часть блоков 95x живёт на 9600,
+                        // а после неудачного 10400 уже не просыпается — поэтому отдельная проба.
+                        try e.prepareBlockScanKwpMode()
+                        _ = try e.cmd("ATSP4")
+                        _ = try e.cmd("ATIB96")
+                        _ = try e.cmd("ATIIA\(target.addressText)")
+                        _ = try e.cmd("ATSH\(header)")
+                        _ = try e.cmd("ATWM\(header)3E")
+                        let probe = try self.probeBlockKwp(e)
+                        _ = try e.cmd("ATIB10")
+                        if probe.state == .responded, let module = DtcModule.module(forAddress: target.address) {
+                            self.workingLinks[module] = Link(proto: "4L", initAddress: target.addressText, header: header)
+                        }
+                        return BlockScanAttempt(mode: "KWP slow init · 5 бод · 9600 бод", state: probe.state, detail: probe.detail)
+                    } == .responded
+                }
+
+                if !answered {
+                    answered = try record("VW TP2.0 / TP1.6 · CAN") {
+                        // PoCOM держит для блоков 95x варианты VW TP 1.6 — пробуем открыть
+                        // диагностический CAN-канал; если открылся, KWP-идентификация идёт по нему.
+                        var tpProto = "T20"
+                        var opened = try e.connectTP20(target: target.address)
+                        let tp20Reason = opened.reason
+                        var tp16Reason = ""
+                        if !opened.connected {
+                            tpProto = "T16"
+                            opened = try e.connectTP16(target: target.address)
+                            tp16Reason = opened.reason
+                        }
+                        guard opened.connected else {
+                            return BlockScanAttempt(mode: "VW TP2.0 / TP1.6 · CAN", state: .noResponse,
+                                                    detail: "CAN-канал не открыт · TP2.0: \(tp20Reason); TP1.6: \(tp16Reason)")
+                        }
+                        let probe = try self.probeBlockKwp(e)
+                        if probe.state == .responded, let module = DtcModule.module(forAddress: target.address) {
+                            self.workingLinks[module] = Link(proto: tpProto, initAddress: target.addressText, header: "")
+                        }
+                        e.disconnectTP16()
+                        let state: BlockScanAttemptState = probe.state == .noResponse ? .channelOnly : probe.state
+                        return BlockScanAttempt(mode: "VW TP2.0 / TP1.6 · CAN", state: state,
+                                                detail: "\(tpProto == "T20" ? "TP2.0" : "TP1.6"): \(probe.detail)")
+                    } == .responded
+                }
+
                 // Probes skipped after an early answer still count toward the planned total,
                 // otherwise the progress bar stalls below 100% on a successful scan.
                 let leftover = plannedForTarget - (progress - progressBeforeTarget)
@@ -688,6 +771,76 @@ final class Me7Link: ObservableObject {
         blockScanLock.unlock()
         t("=== Пользователь запросил остановку полного опроса; текущая проба будет завершена ===")
         ui { self.blockScanStatus = "Останавливаю после текущей пробы…" }
+    }
+
+    /// Глубокий поиск: fast init startCommunication по каждому физическому адресу 0x01–0x7F.
+    /// Так на этом Cayenne нашлись двигатель (0x10) и приборка (0x61) — блоки могут сидеть
+    /// на нестандартных Porsche-адресах. Только чтение: сеанс + идентификация 1A9B.
+    func sweepFastInitAddresses(_ s: Settings) {
+        guard beginBlockScan() else { return }
+        job({ message in
+            self.ui { self.sweepStatus = "Глубокий поиск прерван: \(message)"; self.blockScanState = .fail }
+        }) {
+            defer { self.endBlockScan() }
+            guard let e = self.elm else {
+                self.ui { self.sweepStatus = "Сначала подключи ELM327" }
+                return
+            }
+            self.t("=== ГЛУБОКИЙ ПОИСК АДРЕСОВ · fast init startCommunication 0x01–0x7F, только чтение ===")
+            self.ui {
+                self.blockScanState = .busy
+                self.sweepFound = []
+                self.sweepStatus = "Идёт опрос адресов 0x01–0x7F…"
+            }
+            // Физический адрес → известный блок (по таблице fastInitTargets модулей).
+            var knownByPhysical: [Int: String] = [:]
+            for module in DtcModule.allCases {
+                for physical in module.fastInitTargets where knownByPhysical[physical] == nil {
+                    knownByPhysical[physical] = module.title
+                }
+            }
+            var found: [String] = []
+            for address in 0x01...0x7F {
+                if self.shouldStopBlockScan { break }
+                let physicalText = hx(address)
+                self.ui { self.sweepStatus = "Проба 0x\(physicalText) из 0x7F · найдено: \(found.count)" }
+                try e.prepareBlockScanKwpMode()
+                _ = try e.cmd("ATSP5")
+                let header = "81\(physicalText)F1"
+                _ = try e.cmd("ATSH\(header)")
+                _ = try e.cmd("ATWM\(header)3E")
+                let frames = try e.requestFramesForBlockScan("1A9B", timeout: 6)
+                let answers = frames.filter { !$0.bytes.isEmpty }
+                guard let first = answers.first else { continue }
+                let known = knownByPhysical[address].map { " · \($0)" } ?? ""
+                let description: String
+                if first.isPositive(0x1A), first.bytes.count > 2 {
+                    description = Dtc.identificationText(Array(first.bytes.dropFirst(2)))
+                } else if first.negative {
+                    description = "ответил отказом \(first.bytes.map { hx($0) }.joined(separator: " "))"
+                } else {
+                    description = "ответил: \(first.bytes.map { hx($0) }.joined(separator: " "))"
+                }
+                let line = "0x\(physicalText)\(known) — \(description)"
+                self.t("ГЛУБОКИЙ ПОИСК · ответил \(line)")
+                found.append(line)
+                self.ui { self.sweepFound = found }
+                if let module = DtcModule.module(forAddress: address) {
+                    self.ui { _ = self.discovered.insert(module) }
+                }
+                // Закрыть сеанс, чтобы блок не держал диагностику до следующего адреса.
+                _ = try? e.request("1082", timeout: 1)
+            }
+            let stopped = self.shouldStopBlockScan
+            let summary = found.isEmpty
+                ? "Глубокий поиск\(stopped ? " остановлен" : " завершён"): ни один адрес не ответил"
+                : "Глубокий поиск\(stopped ? " остановлен" : " завершён"): ответили \(found.count) адрес(а/ов)"
+            self.t("=== ИТОГ ГЛУБОКОГО ПОИСКА ===")
+            self.t(summary)
+            for line in found { self.t("  \(line)") }
+            self.ui { self.sweepStatus = summary; self.blockScanState = .idle }
+            self.flushTraceFile()
+        }
     }
 
     private func probeBlockKwp(_ e: Elm) throws -> (response: Response?, negativeResponse: Response?, state: BlockScanAttemptState, detail: String) {

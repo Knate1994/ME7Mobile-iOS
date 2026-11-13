@@ -231,7 +231,7 @@ final class Elm {
         tp20Channel = nil
         _ = try cmd("ATPC")
         Thread.sleep(forTimeInterval: 0.15)   // let the K-line go idle before the next init
-        for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATSTFF"] {
+        for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATSTFF", "ATIB10"] {
             _ = try cmd(command)
         }
     }
@@ -413,7 +413,7 @@ final class Elm {
         tp20Channel = nil
         _ = try cmd("ATPC")
         Thread.sleep(forTimeInterval: 0.15)   // let the K-line go idle before the next init
-        for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATSTFF", "ATCRA"] {
+        for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATSTFF", "ATCRA", "ATIB10"] {
             _ = try cmd(command)
         }
     }
