@@ -1001,14 +1001,17 @@ final class Me7Link: ObservableObject {
     }
 
     /// Returns (accepted session, "") or (nil, short reason of the last failure).
+    /// Session open goes through requestFinal: blocks like the suspension, gateway and
+    /// airbag often answer 7F 10 78 ("response pending") first and send the real
+    /// 50 xx confirmation in the next frame — taking the first frame would lose them.
     private func startSession(_ e: Elm, _ list: [String]) throws -> (String?, String) {
         var reason = "нет ответа"
         for sess in list {
-            let r = try e.request(sess == "-" ? "3E" : sess, timeout: 8)
+            let r = try requestFinal(e, sess == "-" ? "3E" : sess, service: sess == "-" ? 0x3E : 0x10, timeout: 8)
             t("\(sess == "-" ? "tester present" : "session \(sess)"): \(r)")
             if sess == "-" && r.ok && !r.negative { return ("без запроса сессии", "") }
             if r.isPositive(0x10) { return (sess, "") }
-            if r.negative { reason = "отказ 7F \(hx(r.bytes[1])) \(hx(r.bytes[2])) на \(sess)" }
+            if r.negative, r.bytes.count > 2 { reason = "отказ 7F \(hx(r.bytes[1])) \(hx(r.bytes[2])) на \(sess)" }
             else if let first = r.errors.first { reason = first }
             else { reason = "нет ответа" }
             let busError = r.errors.contains { err in
