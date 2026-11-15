@@ -811,11 +811,19 @@ final class Me7Link: ObservableObject {
                 _ = try e.cmd("ATWM\(header)3E")
                 let frames = try e.requestFramesForBlockScan("1A9B", timeout: 6)
                 let answers = frames.filter { !$0.bytes.isEmpty }
-                guard let first = answers.first else { continue }
-                let known = knownByPhysical[address].map { " · \($0)" } ?? ""
+                // Блоки Cayenne часто сначала шлют 7F 1A 78 («обработка»), а финальный
+                // положительный ответ приходит следующим кадром — берём его, а не первый.
+                let positive = answers.first { $0.isPositive(0x1A) && $0.bytes.count > 2 }
+                guard let first = positive ?? answers.first else { continue }
+                let payload = positive.map { Array($0.bytes.dropFirst(2)) }
+                let identified = payload.flatMap { Dtc.identifyModule($0) }
+                let name = identified?.title ?? knownByPhysical[address].map { "\($0) (по адресу)" }
+                let known = name.map { " · \($0)" } ?? ""
                 let description: String
-                if first.isPositive(0x1A), first.bytes.count > 2 {
-                    description = Dtc.identificationText(Array(first.bytes.dropFirst(2)))
+                if let payload = payload {
+                    description = Dtc.identificationText(payload)
+                } else if first.negative, first.bytes.count > 2, first.bytes[2] == 0x78 {
+                    description = "дал только «обработка» (\(first.bytes.map { hx($0) }.joined(separator: " "))), финальный ответ не пришёл"
                 } else if first.negative {
                     description = "ответил отказом \(first.bytes.map { hx($0) }.joined(separator: " "))"
                 } else {
@@ -825,8 +833,9 @@ final class Me7Link: ObservableObject {
                 self.t("ГЛУБОКИЙ ПОИСК · ответил \(line)")
                 found.append(line)
                 self.ui { self.sweepFound = found }
-                if let module = DtcModule.module(forAddress: address) {
+                if let module = identified {
                     self.ui { _ = self.discovered.insert(module) }
+                    self.workingLinks[module] = Link(proto: "5", initAddress: "", header: header)
                 }
                 // Закрыть сеанс, чтобы блок не держал диагностику до следующего адреса.
                 _ = try? e.request("1082", timeout: 1)

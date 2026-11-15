@@ -59,16 +59,16 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
                         subtitle: "Bosch ME7.1.1 · адрес 01", fastInit: [0x10, 0x01])
         case .transmission:
             return Info(title: "АКПП", symbol: "gearshape.fill", address: 0x02,
-                        subtitle: "Tiptronic · адрес 02",
-                        hint: "АКПП на этом Cayenne подтверждённо говорит KWP2000 (Вася диагност: адрес 02, ~10,4 кБод, KW EF8F). Приложение перебирает все пути, которыми пользуются Abrites/PoCOM: fast init, 5-бод 10400 (повторы + явный ATSI), 5-бод 9600 и VW TP2.0/TP1.6 по CAN. Если всё молчит — проверь питание блока и диагностическую линию (пины 3/7 OBD объединены перемычкой).")
+                        subtitle: "Aisin 09D · отвечает на адресе 1A", fastInit: [0x1A, 0x02],
+                        hint: "Трасса 2026-11-14: коробка 09D (ID 09D927750AK) отвечает fast init на физическом адресе 0x1A; на «справочном» 0x02 молчит.")
         case .absEsp:
             return Info(title: "ABS / ESP (PSM)", symbol: "car.fill", address: 0x03,
                         subtitle: "Стабилизация PSM · адрес 03",
-                        hint: "PSM (ESP ALLRAD MK25) на этом Cayenne подтверждённо говорит KWP2000 (Вася диагност: адрес 03, ~10,4 кБод, KW E98F, 5-бод инициализация). Приложение перебирает все пути, которыми пользуются Abrites/PoCOM: fast init, 5-бод 10400 (повторы + явный ATSI), 5-бод 9600 и VW TP2.0/TP1.6 по CAN. Если всё молчит — проверь питание блока и диагностическую линию (пины 3/7 OBD объединены перемычкой).")
+                        hint: "PSM по трассам 2026-11-14 на K-line не отозвался ни на одном адресе: fast init 0x03 молчит, а 5-бод инициализация на клоне ELM почти всегда падает (BUS INIT: ERROR). Вася диагност видел блок на адресе 03, ~10,4 кБод, KW E98F (KWP2000, 5-бод инициализация) — поэтому перебираем fast init, 5-бод 10400 (повторы + явный ATSI), 5-бод 9600 и VW TP2.0/TP1.6 по CAN. Если всё молчит — проверь питание блока и диагностическую линию (пины 3/7 OBD объединены перемычкой).")
         case .suspension:
             return Info(title: "Пневмоподвеска", symbol: "arrow.up.and.down", address: 0x34,
-                        subtitle: "Регулировка уровня · адрес 34",
-                        hint: "Блок подвески на Cayenne 955 опрашивается по K-line (KWP2000). Если не отвечает — проверь питание блока и K-line.")
+                        subtitle: "LUFTFDR/CDC · адреса 38/39", fastInit: [0x38, 0x39, 0x34],
+                        hint: "Трасса 2026-11-14: блок 7L0907553E (LUFTFDR.-CDC) отвечает fast init на адресах 0x38 и 0x39; ответ может начинаться с 7F 1A 78 — финальный ID приходит следующим кадром.")
         case .cluster:
             return Info(title: "Приборная панель", symbol: "speedometer", address: 0x17,
                         subtitle: "KOMBI · адрес 17, физический 61", fastInit: [0x61, 0x17])
@@ -81,10 +81,13 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
         case .onboardSupply: return Info(title: "Бортовая электрика", symbol: "bolt.fill", address: 0x09)
         case .cruiseControl: return Info(title: "Круиз-контроль", symbol: "timer", address: 0x11)
         case .distanceControl: return Info(title: "Контроль дистанции", symbol: "dot.radiowaves.left.and.right", address: 0x13)
-        case .airbag: return Info(title: "Airbag / SRS", symbol: "shield.fill", address: 0x15)
-        case .steeringColumn: return Info(title: "Электроника рулевой колонки", symbol: "steeringwheel", address: 0x16)
+        case .airbag: return Info(title: "Airbag / SRS", symbol: "shield.fill", address: 0x15,
+                                  subtitle: "Airbag 8.4E · адрес 58", fastInit: [0x58, 0x15])
+        case .steeringColumn: return Info(title: "Электроника рулевой колонки", symbol: "steeringwheel", address: 0x16,
+                                          subtitle: "Lenksäulenmodul · адрес 30", fastInit: [0x30, 0x16])
         case .auxHeater: return Info(title: "Дополнительный отопитель", symbol: "flame.fill", address: 0x18)
-        case .gateway: return Info(title: "CAN-шлюз", symbol: "arrow.triangle.branch", address: 0x19)
+        case .gateway: return Info(title: "CAN-шлюз", symbol: "arrow.triangle.branch", address: 0x19,
+                                   subtitle: "Gateway K<>CAN · адрес 40", fastInit: [0x40, 0x19])
         case .awdControl: return Info(title: "Раздаточная коробка / AWD (0x22)", symbol: "arrow.triangle.swap", address: 0x22)
         case .leftHeadlight: return Info(title: "Левая фара", symbol: "headlight.high.beam.fill", address: 0x29)
         case .diffLock: return Info(title: "Блокировка дифференциала", symbol: "lock.rotation", address: 0x32)
@@ -105,7 +108,8 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
         case .tailgate: return Info(title: "Электропривод задней двери", symbol: "rectangle.portrait.and.arrow.forward", address: 0x6D)
         case .seatPassengerAlt: return Info(title: "Память пассажирского сиденья (0x6E)", symbol: "person.fill", address: 0x6E)
         case .telematics: return Info(title: "Телематика", symbol: "network", address: 0x75)
-        case .parkAssist: return Info(title: "Парктроники ParkAssist", symbol: "parkingsign.circle.fill", address: 0x76)
+        case .parkAssist: return Info(title: "Парктроники ParkAssist", symbol: "parkingsign.circle.fill", address: 0x76,
+                                      subtitle: "Einparkhilfe · адрес 60", fastInit: [0x60, 0x76])
         case .phone: return Info(title: "Телефон", symbol: "phone.fill", address: 0x77)
         case .mostGateway: return Info(title: "MOST-шлюз · Cayenne", symbol: "point.3.connected.trianglepath.dotted", address: 0x82)
         }
@@ -123,11 +127,15 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
     var sessions: [String] { ["1089", "1086", "1003", "-"] }
     var protocolHint: String? { info.hint }
 
-    /// Blocks always shown on the errors screen: the drivetrain trio plus the blocks this
-    /// Cayenne 955 provably answered from in the traces (раздатка 0x1C, стеклоочистители 0x68).
+    /// Blocks always shown on the errors screen: everything this Cayenne 955 provably
+    /// answered from in the traces (двигатель 0x10, АКПП 0x1A, раздатка 0x1C,
+    /// рулевая колонка 0x30, пневмоподвеска 0x38/0x39, шлюз 0x40, Airbag 0x58,
+    /// парктроник 0x60, приборка 0x61, стеклоочистители 0x68) plus ABS/PSM,
+    /// which is still unproven on K-line.
     var isBase: Bool {
         switch self {
-        case .engine, .transmission, .absEsp, .suspension, .transferCase, .wipers: return true
+        case .engine, .transmission, .absEsp, .suspension, .transferCase, .wipers,
+             .steeringColumn, .gateway, .airbag, .parkAssist, .cluster: return true
         default: return false
         }
     }
@@ -173,13 +181,11 @@ struct BlockScanTarget: Identifiable, Hashable {
     var id: Int { address }
     var addressText: String { String(format: "%02X", address) }
 
-    /// Curated from the Touareg 7L scan profile, with the two address aliases confirmed
-    /// by the supplied Cayenne traces and the Cayenne MOST gateway added separately.
-    /// Blocks that reliably answered on this car (0x01 двигатель, 0x1C раздатка,
-    /// 0x34 пневмоподвеска, 0x68 стеклоочистители) are always on the errors screen
-    /// and are no longer probed here.
+    /// Curated from the Touareg 7L scan profile, minus the blocks confirmed by the
+    /// 2026-11-14 Cayenne traces — those moved to the errors screen with their proven
+    /// physical addresses (АКПП 0x1A, рулевая колонка 0x30, пневма 0x38/0x39, шлюз 0x40,
+    /// Airbag 0x58, парктроник 0x60, приборка 0x61) and are no longer probed here.
     static let cayenne955: [BlockScanTarget] = [
-        .init(address: 0x02, title: "АКПП Tiptronic"),
         .init(address: 0x03, title: "ABS / ESP (PSM)"),
         .init(address: 0x05, title: "KESSY · доступ и запуск"),
         .init(address: 0x06, title: "Память пассажирского сиденья"),
@@ -187,17 +193,12 @@ struct BlockScanTarget: Identifiable, Hashable {
         .init(address: 0x09, title: "Бортовая электрика"),
         .init(address: 0x11, title: "Круиз-контроль · дополнительный ЭБУ"),
         .init(address: 0x13, title: "Контроль дистанции"),
-        .init(address: 0x15, title: "Airbag / SRS"),
-        .init(address: 0x16, title: "Электроника рулевой колонки"),
-        .init(address: 0x17, title: "Приборная панель", fastInitTargets: [0x61, 0x17]),
         .init(address: 0x18, title: "Дополнительный отопитель"),
-        .init(address: 0x19, title: "CAN-шлюз"),
         .init(address: 0x22, title: "Раздаточная коробка / AWD"),
         .init(address: 0x29, title: "Левая фара"),
         .init(address: 0x32, title: "Блокировка дифференциала"),
         .init(address: 0x36, title: "Память водительского сиденья"),
         .init(address: 0x37, title: "Навигация / PCM"),
-        .init(address: 0x39, title: "Правая фара"),
         .init(address: 0x3C, title: "Ассистент перестроения"),
         .init(address: 0x46, title: "Комфорт / центральный замок"),
         .init(address: 0x47, title: "Усилитель аудиосистемы"),
@@ -211,7 +212,6 @@ struct BlockScanTarget: Identifiable, Hashable {
         .init(address: 0x6D, title: "Электропривод задней двери"),
         .init(address: 0x6E, title: "Память пассажирского сиденья"),
         .init(address: 0x75, title: "Телематика"),
-        .init(address: 0x76, title: "Парктроники ParkAssist"),
         .init(address: 0x77, title: "Телефон"),
         .init(address: 0x82, title: "MOST-шлюз · Cayenne"),
     ]
@@ -274,6 +274,30 @@ enum Dtc {
             if !text.isEmpty { return text }
         }
         return payload.map { hx($0) }.joined(separator: " ")
+    }
+
+    /// Recognizes the answering block by its 1A9B identification payload. On this Cayenne
+    /// the blocks sit on Porsche-specific physical addresses (АКПП 0x1A, пневма 0x38/0x39…),
+    /// so the address alone cannot say which module answered — the ID bytes can.
+    static func identifyModule(_ payload: [Int]) -> DtcModule? {
+        let text = String(bytes: payload.filter { (0x20...0x7E).contains($0) }.map { UInt8($0) },
+                          encoding: .ascii)?.lowercased() ?? ""
+        let markers: [(String, DtcModule)] = [
+            ("transfercase", .transferCase),
+            ("einparkhilfe", .parkAssist),
+            ("luftfdr", .suspension),
+            ("gateway", .gateway),
+            ("airbag", .airbag),
+            ("kombiinstrument", .cluster),
+            ("09d9277", .transmission),
+            ("8te2", .engine),
+        ]
+        for (marker, module) in markers where text.contains(marker) {
+            return module
+        }
+        // "Lenksäulenmodul": the ä (0xE4) is dropped by the printable filter.
+        if text.contains("lenks"), text.contains("ulenmodul") { return .steeringColumn }
+        return nil
     }
 
     private static func decode(_ word: String, module: DtcModule) -> (code: String, description: String) {
