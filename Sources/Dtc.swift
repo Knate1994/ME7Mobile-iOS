@@ -64,7 +64,7 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
         case .absEsp:
             return Info(title: "ABS / ESP (PSM)", symbol: "car.fill", address: 0x03,
                         subtitle: "Стабилизация PSM · адрес 03",
-                        hint: "PSM по трассам 2026-11-14 на K-line не отозвался ни на одном адресе: fast init 0x03 молчит, а 5-бод инициализация на клоне ELM почти всегда падает (BUS INIT: ERROR). Вася диагност видел блок на адресе 03, ~10,4 кБод, KW E98F (KWP2000, 5-бод инициализация) — поэтому перебираем fast init, 5-бод 10400 (повторы + явный ATSI), 5-бод 9600 и VW TP2.0/TP1.6 по CAN. Если всё молчит — проверь питание блока и диагностическую линию (пины 3/7 OBD объединены перемычкой).")
+                        hint: "Для блока 7L0 907 379 C открой «Тест блоков» → «Проверить ABS MK25». Результат сравнения с данными ВАСИ сохраняется в трассе.")
         case .suspension:
             return Info(title: "Пневмоподвеска", symbol: "arrow.up.and.down", address: 0x34,
                         subtitle: "LUFTFDR/CDC · адреса 38/39", fastInit: [0x38, 0x39, 0x34],
@@ -282,6 +282,7 @@ enum Dtc {
     static func identifyModule(_ payload: [Int]) -> DtcModule? {
         let text = String(bytes: payload.filter { (0x20...0x7E).contains($0) }.map { UInt8($0) },
                           encoding: .ascii)?.lowercased() ?? ""
+        if MK25Test.matchesPart(payload) { return .absEsp }
         let markers: [(String, DtcModule)] = [
             ("transfercase", .transferCase),
             ("einparkhilfe", .parkAssist),

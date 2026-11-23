@@ -365,8 +365,23 @@ struct BlockScanView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 explanationCard
+                Button {
+                    link.testMK25Connection()
+                } label: {
+                    Label("Проверить ABS MK25", systemImage: "waveform.path.ecg")
+                        .frame(maxWidth: .infinity, minHeight: 42)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(link.elmState != .ok || scanning || link.mk25TestRunning || link.logging || link.clearAllState == .busy)
+                if !link.mk25Report.isEmpty {
+                    Text(link.mk25Report)
+                        .font(.footnote)
+                        .textSelection(.enabled)
+                }
                 scanButton
+                    .disabled(link.mk25TestRunning)
                 sweepCard
+                    .disabled(link.mk25TestRunning)
 
                 if link.blockScanTotal > 0 {
                     progressCard

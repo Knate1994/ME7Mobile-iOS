@@ -65,6 +65,8 @@ final class Me7Link: ObservableObject {
     @Published var blockScanProgress = 0
     @Published var blockScanTotal = 0
     @Published var blockScanResults: [BlockScanResult] = []
+    @Published private(set) var mk25TestRunning = false
+    @Published private(set) var mk25Report = ""
     @Published var sweepStatus = "Глубокий поиск ещё не запускался"
     @Published var sweepFound: [String] = []
     /// Blocks that provably answered during this ELM connection (scan or direct connect).
@@ -258,6 +260,7 @@ final class Me7Link: ObservableObject {
             self.trace.removeAll()
             // New connection = fresh vehicle state: found blocks and scan results reset,
             // so the next full scan checks every address again.
+            self.mk25Report = ""
             self.discovered.removeAll()
             self.blockScanResults = []
             self.blockScanState = .idle
@@ -536,6 +539,62 @@ final class Me7Link: ObservableObject {
 
     /// Probe the known Cayenne 955/VAG address table over each transport supported by this ELM path.
     /// No DTC erase, coding, actuator or write service is sent; only identification and session probes.
+    func testMK25Connection() {
+        guard !logging, beginBlockScan() else { return }
+        mk25TestRunning = true
+        mk25Report = "Подготовка проверки…"
+        worker.async {
+            defer {
+                self.flushTraceFile()
+                self.endBlockScan()
+                self.ui { self.mk25TestRunning = false }
+            }
+            guard let elm = self.elm else {
+                self.ui { self.mk25Report = "Сначала подключи ELM327" }
+                return
+            }
+            if let previous = self.activeModule {
+                self.updateModule(previous) { $0.connectionState = .idle; $0.connectionText = "Сеанс завершён для проверки ABS" }
+            }
+            self.activeModule = nil
+            self.ecuOk = false
+            self.setEcu(.idle, "Выполняется проверка ABS")
+            self.updateModule(.absEsp) { $0 = ModuleDiagnostic(); $0.connectionState = .busy; $0.connectionText = "Проверка ABS MK25" }
+            self.t("=== ABS MK25 · адрес 03 · ожидаемый блок 7L0 907 379 C · KW E9 8F ===")
+            do {
+                let result = try MK25Test.run(elm) { stage in
+                    self.t(stage)
+                    self.flushTraceFile()
+                    self.ui { self.mk25Report = stage }
+                }
+                if result.identified {
+                    self.activeModule = .absEsp
+                    self.ui { _ = self.discovered.insert(.absEsp) }
+                    self.updateModule(.absEsp) {
+                        $0.connectionState = .ok
+                        $0.connectionText = "Подключено · \(result.text)"
+                        $0.softwareNumber = "7L0 907 379 C"
+                    }
+                } else {
+                    self.moduleConnectionFail(.absEsp, result.text)
+                    _ = try elm.cmd("ATPC")
+                }
+                self.t("Итог ABS MK25 · \(result.text)")
+                self.ui { self.mk25Report = result.text }
+            } catch {
+                let message = "Проверка ABS прервана: \(error)"
+                self.t(message)
+                self.ui { self.mk25Report = message }
+                if case ElmError.closed = error {
+                    self.elmFail("связь с адаптером потеряна")
+                } else {
+                    _ = try? elm.cmd("ATPC")
+                    self.moduleConnectionFail(.absEsp, message)
+                }
+            }
+        }
+    }
+
     func noteBlockScanScreenOpened() {
         t("=== открыт экран теста блоков ===")
     }
