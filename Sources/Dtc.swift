@@ -42,6 +42,7 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
     case mostGateway
 
     var id: String { rawValue }
+    static let mk25PhysicalAddress = 0x28
 
     private struct Info {
         let title: String
@@ -63,8 +64,8 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
                         hint: "Трасса 2026-11-14: коробка 09D (ID 09D927750AK) отвечает fast init на физическом адресе 0x1A; на «справочном» 0x02 молчит.")
         case .absEsp:
             return Info(title: "ABS / ESP (PSM)", symbol: "car.fill", address: 0x03,
-                        subtitle: "Стабилизация PSM · адрес 03",
-                        hint: "Для блока 7L0 907 379 C открой «Тест блоков» → «Проверить ABS MK25». Результат сравнения с данными ВАСИ сохраняется в трассе.")
+                        subtitle: "MK25 · K-line 0x\(hx(Self.mk25PhysicalAddress))",
+                        fastInit: [Self.mk25PhysicalAddress])
         case .suspension:
             return Info(title: "Пневмоподвеска", symbol: "arrow.up.and.down", address: 0x34,
                         subtitle: "LUFTFDR/CDC · адреса 38/39", fastInit: [0x38, 0x39, 0x34],
@@ -130,8 +131,7 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
     /// Blocks always shown on the errors screen: everything this Cayenne 955 provably
     /// answered from in the traces (двигатель 0x10, АКПП 0x1A, раздатка 0x1C,
     /// рулевая колонка 0x30, пневмоподвеска 0x38/0x39, шлюз 0x40, Airbag 0x58,
-    /// парктроник 0x60, приборка 0x61, стеклоочистители 0x68) plus ABS/PSM,
-    /// which is still unproven on K-line.
+    /// парктроник 0x60, приборка 0x61, стеклоочистители 0x68, ABS/PSM 0x28).
     var isBase: Bool {
         switch self {
         case .engine, .transmission, .absEsp, .suspension, .transferCase, .wipers,
@@ -186,7 +186,7 @@ struct BlockScanTarget: Identifiable, Hashable {
     /// physical addresses (АКПП 0x1A, рулевая колонка 0x30, пневма 0x38/0x39, шлюз 0x40,
     /// Airbag 0x58, парктроник 0x60, приборка 0x61) and are no longer probed here.
     static let cayenne955: [BlockScanTarget] = [
-        .init(address: 0x03, title: "ABS / ESP (PSM)"),
+        .init(address: DtcModule.absEsp.address, title: DtcModule.absEsp.title, fastInitTargets: DtcModule.absEsp.fastInitTargets),
         .init(address: 0x05, title: "KESSY · доступ и запуск"),
         .init(address: 0x06, title: "Память пассажирского сиденья"),
         .init(address: 0x08, title: "Климат-контроль"),
@@ -282,7 +282,9 @@ enum Dtc {
     static func identifyModule(_ payload: [Int]) -> DtcModule? {
         let text = String(bytes: payload.filter { (0x20...0x7E).contains($0) }.map { UInt8($0) },
                           encoding: .ascii)?.lowercased() ?? ""
-        if MK25Test.matchesPart(payload) { return .absEsp }
+        let rawText = String(decoding: payload.map { UInt8(clamping: $0) }, as: UTF8.self)
+        if rawText.range(of: #"7L0[ -]*907[ -]*379[ -]*C(?![A-Z])"#,
+                         options: [.regularExpression, .caseInsensitive]) != nil { return .absEsp }
         let markers: [(String, DtcModule)] = [
             ("transfercase", .transferCase),
             ("einparkhilfe", .parkAssist),

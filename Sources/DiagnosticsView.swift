@@ -171,6 +171,10 @@ struct ModuleErrorsView: View {
         diagnostic.connectionState == .busy || diagnostic.dtcState == .busy
     }
 
+    private var canConnect: Bool {
+        link.elmState == .ok && !link.logging && link.blockScanState != .busy && link.clearAllState != .busy
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -187,6 +191,10 @@ struct ModuleErrorsView: View {
         .navigationTitle(module.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
+        .task(id: canConnect) {
+            guard module == .absEsp, canConnect, !busy else { return }
+            link.connectModule(module, makeSettings())
+        }
         .confirmationDialog("Удалить ошибки из блока «\(module.title)»?", isPresented: $confirmClear, titleVisibility: .visible) {
             Button("Удалить ошибки", role: .destructive) { link.clearDtc(module) }
             Button("Отмена", role: .cancel) {}
@@ -238,7 +246,7 @@ struct ModuleErrorsView: View {
         }
         .buttonStyle(.borderedProminent)
         .tint(.cyan)
-        .disabled(link.elmState != .ok || busy)
+        .disabled(!canConnect || busy)
     }
 
     private var errorActions: some View {
@@ -365,23 +373,8 @@ struct BlockScanView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 explanationCard
-                Button {
-                    link.testMK25Connection()
-                } label: {
-                    Label("Проверить ABS MK25", systemImage: "waveform.path.ecg")
-                        .frame(maxWidth: .infinity, minHeight: 42)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(link.elmState != .ok || scanning || link.mk25TestRunning || link.logging || link.clearAllState == .busy)
-                if !link.mk25Report.isEmpty {
-                    Text(link.mk25Report)
-                        .font(.footnote)
-                        .textSelection(.enabled)
-                }
                 scanButton
-                    .disabled(link.mk25TestRunning)
                 sweepCard
-                    .disabled(link.mk25TestRunning)
 
                 if link.blockScanTotal > 0 {
                     progressCard

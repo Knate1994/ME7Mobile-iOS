@@ -44,7 +44,7 @@ private let baseSetup = ["ATE0", "ATL0", "ATS0", "ATH0", "ATAL", "ATAT1", "ATSTF
 
 /// ME7 over ELM327 K-line, in three separate steps so it is clear which one fails:
 ///  1. connectElm  TCP to the Wi-Fi adapter + AT setup
-///  2. connectEcu  5-baud init to 0x01 (or fast init) -> diagnostic session
+///  2. select the engine in Errors and open its diagnostic session
 ///  3. startLog    0x2C define LID by memory address -> loop 0x21 LID
 ///                 (falls back to 0x23 readMemoryByAddress per variable if 0x2C is refused)
 /// All steps run one after another on a single worker queue; every failure reason goes to the trace.
@@ -65,8 +65,6 @@ final class Me7Link: ObservableObject {
     @Published var blockScanProgress = 0
     @Published var blockScanTotal = 0
     @Published var blockScanResults: [BlockScanResult] = []
-    @Published private(set) var mk25TestRunning = false
-    @Published private(set) var mk25Report = ""
     @Published var sweepStatus = "Глубокий поиск ещё не запускался"
     @Published var sweepFound: [String] = []
     /// Blocks that provably answered during this ELM connection (scan or direct connect).
@@ -248,19 +246,14 @@ final class Me7Link: ObservableObject {
 
     // ---------- 1. adapter ----------
 
-    /// One button starts the adapter connection and queues the ECU connection right after it.
-    /// Both jobs share the serial worker, so the ECU is attempted only after ELM setup completes.
-    func connectAll(_ s: Settings) {
-        connectElm(s)
-        connectEcu(s)
-    }
-
     func connectElm(_ s: Settings) {
+        guard elmState == .idle || elmState == .fail else { return }
+        elmState = .busy
+        elmText = "Подключение к \(s.host):\(s.port)…"
         ui {
             self.trace.removeAll()
             // New connection = fresh vehicle state: found blocks and scan results reset,
             // so the next full scan checks every address again.
-            self.mk25Report = ""
             self.discovered.removeAll()
             self.blockScanResults = []
             self.blockScanState = .idle
@@ -273,10 +266,14 @@ final class Me7Link: ObservableObject {
             self.closeAll()
             self.resetModules("Ожидание подключения")
             self.setEcu(.idle, "НЕ ПОДКЛЮЧЕНО")
-            self.setElm(.busy, "Подключение к \(s.host):\(s.port)…")
             self.traceFile = self.openOutput("me7_\(self.stamp())_trace.txt")
             self.t("=== ELM \(s.host):\(s.port) ===")
-            let e = Elm(trace: { [weak self] in self?.t($0) })
+            let e = Elm(trace: { [weak self] in self?.t($0) }, onClosed: { [weak self] adapter in
+                self?.worker.async { [weak self] in
+                    guard let self, self.elm === adapter else { return }
+                    self.elmFail("связь с адаптером потеряна")
+                }
+            })
             do {
                 try e.open(host: s.host, port: s.port, timeout: 5)
             } catch {
@@ -311,6 +308,9 @@ final class Me7Link: ObservableObject {
     }
 
     func disconnect() {
+        guard elmState == .ok else { return }
+        elmState = .busy
+        elmText = "Отключение от ELM327…"
         running = false
         worker.async {
             self.closeAll()
@@ -419,14 +419,6 @@ final class Me7Link: ObservableObject {
         return (nil, lastError)
     }
 
-    /// User settings first, then fast init variants (kai.ecu alternative: FAST-0x10).
-    func connectEcu(_ s: Settings) {
-        job({ self.ecuFail($0) }) {
-            guard let e = self.elm else { self.ecuFail("сначала подключи ELM"); return }
-            _ = try self.connectEngineOnWorker(e, s)
-        }
-    }
-
     @discardableResult
     private func connectEngineOnWorker(_ e: Elm, _ s: Settings) throws -> Bool {
         ecuOk = false
@@ -491,17 +483,39 @@ final class Me7Link: ObservableObject {
         }
         activeModule = nil
         setEcu(.idle, "Двигатель не выбран для текущей диагностики")
+        let target = module == .absEsp ? hx(DtcModule.mk25PhysicalAddress) : module.target
         updateModule(module) {
             $0.connectionState = .busy
-            $0.connectionText = "Подключение к блоку \(module.target)…"
+            $0.connectionText = "Подключение к блоку 0x\(target)…"
             $0.softwareNumber = "Чтение…"
             $0.dtcState = .idle
             $0.dtcText = "Ошибки не прочитаны"
             $0.codes = []
         }
-        t("=== подключение: \(module.title), адрес 0x\(module.target) ===")
+        t("=== подключение: \(module.title), адрес 0x\(target) ===")
 
-        let target = module.target
+        if module == .absEsp {
+            let frames = try e.fastInitIdentification(header: "81\(target)F1")
+            guard frames.contains(where: { frame in
+                frame.bytes.starts(with: [0x5A, 0x9B]) &&
+                    Dtc.identifyModule(Array(frame.bytes.dropFirst(2))) == .absEsp
+            }) else {
+                let reply = frames.map(\.description).joined(separator: " · ")
+                moduleConnectionFail(module, "MK25 на 0x\(target) не подтвердил номер блока. 1A9B → \(reply.isEmpty ? "нет ответа" : reply)")
+                return false
+            }
+            activeModule = module
+            ui { _ = self.discovered.insert(module) }
+            let status = "Подключено · K-line fast init 0x\(target)"
+            updateModule(module) {
+                $0.connectionState = .ok
+                $0.connectionText = status
+                $0.softwareNumber = "7L0 907 379 C"
+            }
+            t("\(module.title): \(status) · 7L0 907 379 C")
+            return true
+        }
+
         var links = module.fastInitTargets.map { Link(proto: "5", initAddress: "", header: "81\(hx($0))F1") }
         links.append(Link(proto: "4", initAddress: target, header: "81\(target)F1"))
         links.append(Link(proto: "4A", initAddress: target, header: "81\(target)F1"))
@@ -535,64 +549,6 @@ final class Me7Link: ObservableObject {
         message += "\nПроверь питание блока и диагностическую линию (контакты 3/7 OBD)."
         moduleConnectionFail(module, message)
         return false
-    }
-
-    /// Probe the known Cayenne 955/VAG address table over each transport supported by this ELM path.
-    /// No DTC erase, coding, actuator or write service is sent; only identification and session probes.
-    func testMK25Connection() {
-        guard !logging, beginBlockScan() else { return }
-        mk25TestRunning = true
-        mk25Report = "Подготовка проверки…"
-        worker.async {
-            defer {
-                self.flushTraceFile()
-                self.endBlockScan()
-                self.ui { self.mk25TestRunning = false }
-            }
-            guard let elm = self.elm else {
-                self.ui { self.mk25Report = "Сначала подключи ELM327" }
-                return
-            }
-            if let previous = self.activeModule {
-                self.updateModule(previous) { $0.connectionState = .idle; $0.connectionText = "Сеанс завершён для проверки ABS" }
-            }
-            self.activeModule = nil
-            self.ecuOk = false
-            self.setEcu(.idle, "Выполняется проверка ABS")
-            self.updateModule(.absEsp) { $0 = ModuleDiagnostic(); $0.connectionState = .busy; $0.connectionText = "Проверка ABS MK25" }
-            self.t("=== ABS MK25 · адрес 03 · ожидаемый блок 7L0 907 379 C · KW E9 8F ===")
-            do {
-                let result = try MK25Test.run(elm) { stage in
-                    self.t(stage)
-                    self.flushTraceFile()
-                    self.ui { self.mk25Report = stage }
-                }
-                if result.identified {
-                    self.activeModule = .absEsp
-                    self.ui { _ = self.discovered.insert(.absEsp) }
-                    self.updateModule(.absEsp) {
-                        $0.connectionState = .ok
-                        $0.connectionText = "Подключено · \(result.text)"
-                        $0.softwareNumber = "7L0 907 379 C"
-                    }
-                } else {
-                    self.moduleConnectionFail(.absEsp, result.text)
-                    _ = try elm.cmd("ATPC")
-                }
-                self.t("Итог ABS MK25 · \(result.text)")
-                self.ui { self.mk25Report = result.text }
-            } catch {
-                let message = "Проверка ABS прервана: \(error)"
-                self.t(message)
-                self.ui { self.mk25Report = message }
-                if case ElmError.closed = error {
-                    self.elmFail("связь с адаптером потеряна")
-                } else {
-                    _ = try? elm.cmd("ATPC")
-                    self.moduleConnectionFail(.absEsp, message)
-                }
-            }
-        }
     }
 
     func noteBlockScanScreenOpened() {
@@ -846,6 +802,12 @@ final class Me7Link: ObservableObject {
                 return
             }
             self.t("=== ГЛУБОКИЙ ПОИСК АДРЕСОВ · fast init startCommunication 0x01–0x7F, только чтение ===")
+            if let previous = self.activeModule {
+                self.updateModule(previous) { $0.connectionState = .idle; $0.connectionText = "Сеанс закрыт для глубокого поиска" }
+            }
+            self.activeModule = nil
+            self.ecuOk = false
+            self.setEcu(.idle, "Выполняется глубокий поиск адресов")
             self.ui {
                 self.blockScanState = .busy
                 self.sweepFound = []
@@ -863,12 +825,8 @@ final class Me7Link: ObservableObject {
                 if self.shouldStopBlockScan { break }
                 let physicalText = hx(address)
                 self.ui { self.sweepStatus = "Проба 0x\(physicalText) из 0x7F · найдено: \(found.count)" }
-                try e.prepareBlockScanKwpMode()
-                _ = try e.cmd("ATSP5")
                 let header = "81\(physicalText)F1"
-                _ = try e.cmd("ATSH\(header)")
-                _ = try e.cmd("ATWM\(header)3E")
-                let frames = try e.requestFramesForBlockScan("1A9B", timeout: 6)
+                let frames = try e.fastInitIdentification(header: header)
                 let answers = frames.filter { !$0.bytes.isEmpty }
                 // Блоки Cayenne часто сначала шлют 7F 1A 78 («обработка»), а финальный
                 // положительный ответ приходит следующим кадром — берём его, а не первый.
@@ -1099,7 +1057,7 @@ final class Me7Link: ObservableObject {
                 return Response(bytes: Array(r.bytes[start...]), errors: r.errors)
             }
             let pendingOnly = r.negative && r.bytes.count > 2 && r.bytes[1] == service && r.bytes[2] == 0x78
-            if pendingOnly {
+            if pendingOnly && attempt + 1 < attempts {
                 t("запрос \(hex): блок попросил время (7F \(hx(service)) 78), жду и повторяю (\(attempt + 1)/\(attempts))")
                 Thread.sleep(forTimeInterval: 0.8)
                 continue
@@ -1112,12 +1070,25 @@ final class Me7Link: ObservableObject {
     /// Module request with recovery: if the block stays silent (the KWP session expired while
     /// the app was idle), reconnects to the module once and retries the request.
     private func moduleRequestFinal(_ e: Elm, _ module: DtcModule, _ hex: String, service: Int, timeout: Double) throws -> Response {
-        let first = try requestFinal(e, hex, service: service, timeout: timeout)
-        let silent = first.bytes.isEmpty && first.errors.isEmpty
-        guard silent, activeModule == module, let s = lastSettings else { return first }
-        t("\(module.title): нет ответа на \(hex); сеанс мог завершиться по таймауту — переподключаюсь и повторяю запрос")
-        guard try connectModuleOnWorker(module, e, s) else { return first }
-        return try requestFinal(e, hex, service: service, timeout: timeout)
+        guard activeModule == module else { return Response(bytes: [], errors: ["Нет соединения с выбранным блоком"]) }
+        // A pending MK25 clear is verified by reading faults again. Do not resend it on silence or pending.
+        let clearingMK25 = module == .absEsp && service == 0x14
+        func send() throws -> Response {
+            try requestFinal(e, hex, service: service, timeout: timeout, attempts: clearingMK25 ? 1 : 4)
+        }
+        var reply = try send()
+        let silent = reply.bytes.isEmpty && (reply.errors.isEmpty || (module == .absEsp && reply.errors == ["NO DATA"]))
+        if silent, !clearingMK25, let s = lastSettings {
+            t("\(module.title): нет ответа на \(hex); переподключаюсь и повторяю запрос")
+            guard try connectModuleOnWorker(module, e, s) else { return reply }
+            reply = try send()
+        }
+        // Identification works in the default MK25 session. Switch only if the requested DTC service requires it.
+        if module == .absEsp, reply.negative, reply.bytes[1] == service, [0x7E, 0x7F, 0x80].contains(reply.bytes[2]) {
+            let (session, _) = try startSession(e, module.sessions.filter { $0 != "-" })
+            if session != nil { reply = try send() }
+        }
+        return reply
     }
 
     /// Standard OBD requests tell apart "adapter has no working K-line" from "K-line works, ECU ignores our init".

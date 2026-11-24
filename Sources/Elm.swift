@@ -51,6 +51,7 @@ struct Response: CustomStringConvertible {
 /// Every exchange goes to `trace`.
 final class Elm {
     private let trace: (String) -> Void
+    private let onClosed: (Elm) -> Void
     private var conn: NWConnection?
     private struct TP16Channel {
         let testerCanId: Int
@@ -72,7 +73,10 @@ final class Elm {
     private var closed = false
     private let dataSignal = DispatchSemaphore(value: 0)
 
-    init(trace: @escaping (String) -> Void) { self.trace = trace }
+    init(trace: @escaping (String) -> Void, onClosed: @escaping (Elm) -> Void) {
+        self.trace = trace
+        self.onClosed = onClosed
+    }
 
     func open(host: String, port: Int, timeout: Double) throws {
         guard let p = NWEndpoint.Port(rawValue: UInt16(clamping: port)) else { throw ElmError.connect("неверный порт") }
@@ -105,8 +109,12 @@ final class Elm {
     }
 
     private func markClosed() {
-        lock.lock(); closed = true; lock.unlock()
+        lock.lock()
+        let firstClose = !closed
+        closed = true
+        lock.unlock()
         dataSignal.signal()
+        if firstClose { onClosed(self) }
     }
 
     private func receive(_ c: NWConnection) {
@@ -197,7 +205,7 @@ final class Elm {
         return Response(bytes: bytes, errors: errors)
     }
 
-    /// Block-scan-only variant that keeps each ELM response line separate. Some ECUs
+    /// Keep each ELM response line separate when identifying a block. Some ECUs
     /// first return KWP NRC 0x78 (response pending), then the actual positive answer;
     /// combining those lines makes the pending response hide the positive one.
     func requestFramesForBlockScan(_ hex: String, timeout: Double = 3) throws -> [Response] {
@@ -234,6 +242,20 @@ final class Elm {
         for command in ["ATCAF1", "ATCFC1", "ATH0", "ATS0", "ATAT1", "ATSTFF", "ATIB10"] {
             _ = try cmd(command)
         }
+    }
+
+    /// The first identification request triggers the fast init on the physical target.
+    func fastInitIdentification(header: String) throws -> [Response] {
+        try prepareBlockScanKwpMode()
+        _ = try cmd("ATSP5")
+        _ = try cmd("ATSH\(header)")
+        _ = try cmd("ATWM\(header)3E")
+        let frames = try requestFramesForBlockScan("1A9B", timeout: 6)
+        if !frames.isEmpty && frames.allSatisfy({ $0.bytes == [0x7F, 0x1A, 0x78] }) {
+            Thread.sleep(forTimeInterval: 0.8)
+            return frames + (try requestFramesForBlockScan("1A9B", timeout: 6))
+        }
+        return frames
     }
 
     /// Opens VW TP 1.6 over the ELM327's user-defined 11-bit, variable-DLC CAN mode.
