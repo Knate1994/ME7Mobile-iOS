@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 struct Settings {
@@ -12,6 +13,37 @@ struct Settings {
 }
 
 enum LinkState: Equatable { case idle, busy, ok, fail }
+
+struct AddressFinding: Identifiable {
+    struct ID: Hashable {
+        let address: Int
+        let can: Bool
+    }
+    let id: ID
+    let route: SweepRoute
+    let detail: String
+    let hasIdentity: Bool
+    let module: DtcModule?
+}
+
+struct AddressSweepReport {
+    enum Phase { case idle, running, paused, completed, failed }
+    var phase = Phase.idle
+    var status = "Поиск ещё не запускался"
+    var position = 0
+    var skipped = 0
+    var kLineAddresses: Set<Int> = []
+    var tp20Addresses: Set<Int> = []
+    var tp16Addresses: Set<Int> = []
+    var attemptedAddresses: Int { kLineAddresses.union(tp20Addresses).union(tp16Addresses).count }
+    var findings: [AddressFinding] = []
+}
+
+private struct SweepCheckpoint {
+    var report = AddressSweepReport()
+    var unsupportedRates: Set<SweepRate> = []
+    var unsupportedCAN: Set<SweepRoute.Mode> = []
+}
 
 struct LiveValue: Identifiable {
     let id: String
@@ -65,8 +97,9 @@ final class Me7Link: ObservableObject {
     @Published var blockScanProgress = 0
     @Published var blockScanTotal = 0
     @Published var blockScanResults: [BlockScanResult] = []
-    @Published var sweepStatus = "Глубокий поиск ещё не запускался"
-    @Published var sweepFound: [String] = []
+    @Published private(set) var addressSweep = AddressSweepReport()
+    // Only the ELM worker accesses the checkpoint, scoped to its current TCP connection.
+    private var pausedSweep: SweepCheckpoint?
     /// Blocks that provably answered during this ELM connection (scan or direct connect).
     /// Shown on the errors screen next to the four base modules.
     @Published var discovered: Set<DtcModule> = []
@@ -250,6 +283,7 @@ final class Me7Link: ObservableObject {
         guard elmState == .idle || elmState == .fail else { return }
         elmState = .busy
         elmText = "Подключение к \(s.host):\(s.port)…"
+        addressSweep = AddressSweepReport()
         ui {
             self.trace.removeAll()
             // New connection = fresh vehicle state: found blocks and scan results reset,
@@ -263,6 +297,8 @@ final class Me7Link: ObservableObject {
         }
         job({ self.elmFail($0) }) {
             self.lastSettings = s
+            self.pausedSweep = nil
+            self.workingLinks.removeAll()
             self.closeAll()
             self.resetModules("Ожидание подключения")
             self.setEcu(.idle, "НЕ ПОДКЛЮЧЕНО")
@@ -339,21 +375,22 @@ final class Me7Link: ObservableObject {
     // ---------- 2. engine ECU ----------
 
     /// How the ELM wakes up the ECU: protocol 3/4 = 5-baud init to initAddress, 5 = fast init (target taken from header).
-    private struct Link {
+    private struct Link: Equatable {
         /// "5" = KWP fast init; "4" = 5-бод 10400, неявный init первым запросом;
         /// "4A" = 5-бод 10400 с явным ATSI; "4L" = 5-бод 9600 (ATIB96);
         /// "T20"/"T16" = VW TP2.0/TP1.6 по CAN (как Abrites/PoCOM для Cayenne 95x).
         let proto: String
         let initAddress: String
         let header: String
+        var rate: SweepRate = .standard
         var label: String {
             switch proto {
-            case "5": return "fast init \(header.dropFirst(2).prefix(2))"
+            case "5": return "fast init \(header.dropFirst(2).prefix(2)) · \(rate.rawValue) бод"
             case "4A": return "5 бод 0x\(initAddress) · явный ATSI"
             case "4L": return "5 бод 0x\(initAddress) · 9600 бод"
             case "T20": return "VW TP2.0 · CAN · 0x\(initAddress)"
             case "T16": return "VW TP1.6 · CAN · 0x\(initAddress)"
-            default: return "5 бод 0x\(initAddress)"
+            default: return "5 бод 0x\(initAddress) · \(rate.rawValue) бод"
             }
         }
     }
@@ -391,7 +428,10 @@ final class Me7Link: ObservableObject {
             try e.prepareKwpMode()
             _ = try e.cmd("ATSP\(link.proto.prefix(1))")
             if link.proto.hasPrefix("4") { _ = try e.cmd("ATIIA\(link.initAddress)") }
-            if link.proto == "4L" { _ = try e.cmd("ATIB96") }   // 9600 бод: часть блоков Cayenne живёт на нём (Abrites перебирает 10427/9600)
+            let rate: SweepRate = link.proto == "4L" ? .low : link.rate
+            if rate != .standard {
+                guard try e.cmd(rate.command).uppercased() == "OK" else { return (nil, "ELM не подтвердил \(rate.rawValue) бод") }
+            }
             _ = try e.cmd("ATSH\(link.header)")
             _ = try e.cmd("ATWM\(link.header)3E")
             if link.proto == "4A" {
@@ -439,7 +479,7 @@ final class Me7Link: ObservableObject {
             links.append(link)
         }
         if let known = workingLinks[.engine] {
-            links.removeAll { $0.proto == known.proto && $0.initAddress == known.initAddress && $0.header == known.header }
+            links.removeAll { $0 == known }
             links.insert(known, at: 0)
         }
         let sessions = s.sessions.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
@@ -523,7 +563,7 @@ final class Me7Link: ObservableObject {
         links.append(Link(proto: "T20", initAddress: target, header: ""))
         links.append(Link(proto: "T16", initAddress: target, header: ""))
         if let known = workingLinks[module] {
-            links.removeAll { $0.proto == known.proto && $0.initAddress == known.initAddress && $0.header == known.header }
+            links.removeAll { $0 == known }
             links.insert(known, at: 0)
         }
         var failures: [String] = []
@@ -788,84 +828,120 @@ final class Me7Link: ObservableObject {
         ui { self.blockScanStatus = "Останавливаю после текущей пробы…" }
     }
 
-    /// Глубокий поиск: fast init startCommunication по каждому физическому адресу 0x01–0x7F.
-    /// Так на этом Cayenne нашлись двигатель (0x10) и приборка (0x61) — блоки могут сидеть
-    /// на нестандартных Porsche-адресах. Только чтение: сеанс + идентификация 1A9B.
-    func sweepFastInitAddresses(_ s: Settings) {
-        guard beginBlockScan() else { return }
-        job({ message in
-            self.ui { self.sweepStatus = "Глубокий поиск прерван: \(message)"; self.blockScanState = .fail }
-        }) {
-            defer { self.endBlockScan() }
-            guard let e = self.elm else {
-                self.ui { self.sweepStatus = "Сначала подключи ELM327" }
+    func findRespondingAddresses() {
+        guard elmState == .ok, !running, clearAllState != .busy,
+              blockScanState != .busy, beginBlockScan() else { return }
+        let resume = addressSweep.phase == .paused
+        if !resume { addressSweep = AddressSweepReport() }
+        addressSweep.phase = .running
+        addressSweep.status = "Подготовка адаптера…"
+        blockScanState = .busy
+        worker.async {
+            var scan = resume ? self.pausedSweep ?? SweepCheckpoint() : SweepCheckpoint()
+            self.pausedSweep = nil
+            let adapter = self.elm
+            defer {
+                adapter?.finishIdentitySweep()
+                self.flushTraceFile()
+                self.endBlockScan()
+                let finalReport = scan.report
+                self.ui {
+                    self.addressSweep = finalReport
+                    self.blockScanState = finalReport.phase == .failed ? .fail : .idle
+                }
+            }
+            guard let adapter else {
+                scan.report.phase = .failed
+                scan.report.status = "Соединение с ELM327 потеряно"
                 return
             }
-            self.t("=== ГЛУБОКИЙ ПОИСК АДРЕСОВ · fast init startCommunication 0x01–0x7F, только чтение ===")
             if let previous = self.activeModule {
-                self.updateModule(previous) { $0.connectionState = .idle; $0.connectionText = "Сеанс закрыт для глубокого поиска" }
+                self.updateModule(previous) { $0.connectionState = .idle; $0.connectionText = "Сеанс закрыт для поиска адресов" }
             }
             self.activeModule = nil
             self.ecuOk = false
-            self.setEcu(.idle, "Выполняется глубокий поиск адресов")
-            self.ui {
-                self.blockScanState = .busy
-                self.sweepFound = []
-                self.sweepStatus = "Идёт опрос адресов 0x01–0x7F…"
+            self.setEcu(.idle, "Выполняется поиск адресов")
+            self.t("=== ПОИСК ОТВЕЧАЮЩИХ АДРЕСОВ · маршрут \(scan.report.position + 1) из \(SweepRoute.plan.count) ===")
+            do {
+                try self.runAddressSweep(adapter, scan: &scan)
+                let complete = scan.report.position == SweepRoute.plan.count
+                scan.report.phase = complete ? .completed : .paused
+                let identified = scan.report.findings.filter(\.hasIdentity).count
+                scan.report.status = "\(complete ? "Завершено" : "Приостановлено") · откликов по адресам и шинам: \(scan.report.findings.count), из них с ID: \(identified)."
+                if !complete { self.pausedSweep = scan }
+            } catch {
+                scan.report.phase = .failed
+                scan.report.status = "Поиск прерван: \(error). Полученные ответы сохранены."
+                if case ElmError.closed = error { self.elmFail("связь с адаптером потеряна") }
             }
-            // Физический адрес → известный блок (по таблице fastInitTargets модулей).
-            var knownByPhysical: [Int: String] = [:]
-            for module in DtcModule.allCases {
-                for physical in module.fastInitTargets where knownByPhysical[physical] == nil {
-                    knownByPhysical[physical] = module.title
+            self.t("\(scan.report.status) · \(scan.report.position)/\(SweepRoute.plan.count), пропущено: \(scan.report.skipped)")
+        }
+    }
+
+    private func runAddressSweep(_ adapter: Elm, scan: inout SweepCheckpoint) throws {
+        let plan = SweepRoute.plan
+        while scan.report.position < plan.count && !shouldStopBlockScan {
+            let route = plan[scan.report.position]
+            let unsupported = route.rate.map { scan.unsupportedRates.contains($0) } ?? scan.unsupportedCAN.contains(route.mode)
+            if unsupported {
+                scan.report.skipped += 1
+                scan.report.position += 1
+                continue
+            }
+            scan.report.phase = .running
+            scan.report.status = route.label
+            let progress = scan.report
+            ui { self.addressSweep = progress }
+            t("--- Поиск \(scan.report.position + 1)/\(plan.count) · \(route.label) ---")
+            let reply = try adapter.probeIdentity(on: route, stopped: { self.shouldStopBlockScan })
+            if let rate = reply.unsupportedRate { scan.unsupportedRates.insert(rate) }
+            if reply.unsupportedCAN { scan.unsupportedCAN.insert(route.mode) }
+            if let issue = reply.setupIssue { t("Маршрут не проверен · \(issue)") }
+            if reply.attempted {
+                switch route.mode {
+                case .fast, .slow: scan.report.kLineAddresses.insert(route.address)
+                case .tp20: scan.report.tp20Addresses.insert(route.address)
+                case .tp16: scan.report.tp16Addresses.insert(route.address)
                 }
             }
-            var found: [String] = []
-            for address in 0x01...0x7F {
-                if self.shouldStopBlockScan { break }
-                let physicalText = hx(address)
-                self.ui { self.sweepStatus = "Проба 0x\(physicalText) из 0x7F · найдено: \(found.count)" }
-                let header = "81\(physicalText)F1"
-                let frames = try e.fastInitIdentification(header: header)
-                let answers = frames.filter { !$0.bytes.isEmpty }
-                // Блоки Cayenne часто сначала шлют 7F 1A 78 («обработка»), а финальный
-                // положительный ответ приходит следующим кадром — берём его, а не первый.
-                let positive = answers.first { $0.isPositive(0x1A) && $0.bytes.count > 2 }
-                guard let first = positive ?? answers.first else { continue }
-                let payload = positive.map { Array($0.bytes.dropFirst(2)) }
-                let identified = payload.flatMap { Dtc.identifyModule($0) }
-                let name = identified?.title ?? knownByPhysical[address].map { "\($0) (по адресу)" }
-                let known = name.map { " · \($0)" } ?? ""
-                let description: String
-                if let payload = payload {
-                    description = Dtc.identificationText(payload)
-                } else if first.negative, first.bytes.count > 2, first.bytes[2] == 0x78 {
-                    description = "дал только «обработка» (\(first.bytes.map { hx($0) }.joined(separator: " "))), финальный ответ не пришёл"
-                } else if first.negative {
-                    description = "ответил отказом \(first.bytes.map { hx($0) }.joined(separator: " "))"
-                } else {
-                    description = "ответил: \(first.bytes.map { hx($0) }.joined(separator: " "))"
-                }
-                let line = "0x\(physicalText)\(known) — \(description)"
-                self.t("ГЛУБОКИЙ ПОИСК · ответил \(line)")
-                found.append(line)
-                self.ui { self.sweepFound = found }
-                if let module = identified {
-                    self.ui { _ = self.discovered.insert(module) }
-                    self.workingLinks[module] = Link(proto: "5", initAddress: "", header: header)
-                }
-                // Закрыть сеанс, чтобы блок не держал диагностику до следующего адреса.
-                _ = try? e.request("1082", timeout: 1)
+            recordAddressReply(reply, on: route, report: &scan.report)
+            // A stop between two identification requests leaves this route first on resume.
+            if shouldStopBlockScan { break }
+            if !reply.attempted || reply.setupIssue != nil {
+                scan.report.skipped += 1
             }
-            let stopped = self.shouldStopBlockScan
-            let summary = found.isEmpty
-                ? "Глубокий поиск\(stopped ? " остановлен" : " завершён"): ни один адрес не ответил"
-                : "Глубокий поиск\(stopped ? " остановлен" : " завершён"): ответили \(found.count) адрес(а/ов)"
-            self.t("=== ИТОГ ГЛУБОКОГО ПОИСКА ===")
-            self.t(summary)
-            for line in found { self.t("  \(line)") }
-            self.ui { self.sweepStatus = summary; self.blockScanState = .idle }
-            self.flushTraceFile()
+            scan.report.position += 1
+        }
+    }
+
+    private func recordAddressReply(_ reply: SweepReply, on route: SweepRoute, report: inout AddressSweepReport) {
+        guard let detail = reply.identifier ?? reply.evidence else { return }
+        let module = reply.module
+        let description = module.map { "\($0.title) · \(detail)" } ?? detail
+        let id = AddressFinding.ID(address: route.address, can: route.rate == nil)
+        let finding = AddressFinding(id: id, route: route, detail: description, hasIdentity: reply.payload != nil, module: module)
+        t("Отклик · \(route.label) · \(description)")
+        if let index = report.findings.firstIndex(where: { $0.id == id }) {
+            let previous = report.findings[index]
+            if (finding.hasIdentity && !previous.hasIdentity) || (module != nil && previous.module == nil) {
+                report.findings[index] = finding
+            }
+        } else {
+            report.findings.append(finding)
+        }
+        guard let module, workingLinks[module] == nil else { return }
+        let link: Link
+        switch route.mode {
+        case .fast(let rate): link = Link(proto: "5", initAddress: "", header: route.header, rate: rate)
+        case .slow(let rate, let initByte): link = Link(proto: "4", initAddress: hx(initByte), header: route.header, rate: rate)
+        case .tp20: link = Link(proto: "T20", initAddress: hx(route.address), header: "")
+        case .tp16: link = Link(proto: "T16", initAddress: hx(route.address), header: "")
+        }
+        workingLinks[module] = link
+        ui { _ = self.discovered.insert(module) }
+        updateModule(module) {
+            $0.softwareNumber = detail
+            $0.connectionText = "Найден при поиске · \(route.label)"
         }
     }
 

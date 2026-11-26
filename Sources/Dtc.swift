@@ -79,7 +79,7 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
         case .kessy: return Info(title: "KESSY · доступ и запуск", symbol: "key.fill", address: 0x05)
         case .seatPassenger: return Info(title: "Память пассажирского сиденья", symbol: "person.fill", address: 0x06)
         case .climate: return Info(title: "Климат-контроль", symbol: "fan.fill", address: 0x08)
-        case .onboardSupply: return Info(title: "Бортовая электрика", symbol: "bolt.fill", address: 0x09)
+        case .onboardSupply: return Info(title: "BCM · бортовая электрика", symbol: "bolt.fill", address: 0x09)
         case .cruiseControl: return Info(title: "Круиз-контроль", symbol: "timer", address: 0x11)
         case .distanceControl: return Info(title: "Контроль дистанции", symbol: "dot.radiowaves.left.and.right", address: 0x13)
         case .airbag: return Info(title: "Airbag / SRS", symbol: "shield.fill", address: 0x15,
@@ -283,9 +283,17 @@ enum Dtc {
         let text = String(bytes: payload.filter { (0x20...0x7E).contains($0) }.map { UInt8($0) },
                           encoding: .ascii)?.lowercased() ?? ""
         let rawText = String(decoding: payload.map { UInt8(clamping: $0) }, as: UTF8.self)
+        let partNumber = text.filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+        if partNumber.contains("3d0909135") { return .kessy }
+        if partNumber.contains("7l6937049") { return .onboardSupply }
         if rawText.range(of: #"7L0[ -]*907[ -]*379[ -]*C(?![A-Z])"#,
                          options: [.regularExpression, .caseInsensitive]) != nil { return .absEsp }
         let markers: [(String, DtcModule)] = [
+            ("kessy", .kessy),
+            ("bordnetz", .onboardSupply),
+            ("zentralelektrik", .onboardSupply),
+            ("central electrics", .onboardSupply),
+            ("komfortsystem", .comfort),
             ("transfercase", .transferCase),
             ("einparkhilfe", .parkAssist),
             ("luftfdr", .suspension),

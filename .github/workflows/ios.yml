@@ -10,6 +10,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check address coverage and ECU replies
+        run: |
+          xcrun swiftc Sources/{AddressSweep,Dtc,EcuDef,Elm,Me7Link}.swift Tests/AddressSweepChecks.swift -o "$RUNNER_TEMP/check-sweep"
+          "$RUNNER_TEMP/check-sweep"
+
       - name: Generate Xcode project
         run: |
           brew install xcodegen librsvg

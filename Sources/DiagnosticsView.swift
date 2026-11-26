@@ -49,7 +49,7 @@ struct ErrorsView: View {
                     .background(Color.red, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                 }
                 .buttonStyle(.plain)
-                .disabled(link.elmState != .ok || link.clearAllState == .busy)
+                .disabled(link.elmState != .ok || link.clearAllState == .busy || link.blockScanState == .busy)
 
                 if link.clearAllState != .idle {
                     Label(link.clearAllText, systemImage: link.clearAllState == .ok ? "checkmark.circle.fill" : (link.clearAllState == .busy ? "arrow.triangle.2.circlepath" : "exclamationmark.triangle.fill"))
@@ -361,6 +361,7 @@ struct BlockScanView: View {
     @State private var showingTraceShare = false
 
     private var scanning: Bool { link.blockScanState == .busy }
+    private var sweeping: Bool { link.addressSweep.phase == .running }
     private var answeredCount: Int { link.blockScanResults.filter(\.responded).count }
     private var unverifiedCount: Int { link.blockScanResults.filter { !$0.responded && $0.hasUnverifiedResponse }.count }
     private var negativeResponseCount: Int {
@@ -379,11 +380,11 @@ struct BlockScanView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                sweepCard
                 explanationCard
                 scanButton
-                sweepCard
 
-                if link.blockScanTotal > 0 {
+                if link.blockScanTotal > 0 && !sweeping {
                     progressCard
                     summaryCounts
                 }
@@ -425,14 +426,14 @@ struct BlockScanView: View {
 
     private var explanationCard: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Label("Проверка связи с блоками", systemImage: "waveform.path.ecg")
+            Label("Опрос по профилю Touareg 7L", systemImage: "waveform.path.ecg")
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(.cyan)
-            Text("Проверим адреса из профиля Touareg 7L, сопоставив их с твоим Cayenne 955. Для двигателя и приборной панели также учтены физические адреса из приложенных трасс.")
+            Text("Выбери этот опрос для проверки блоков из справочника. Для каждого блока сохраняются маршрут и результат.")
                 .font(.subheadline)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Положительный ответ на запрос сеанса сам по себе не считается найденным блоком: для зелёного результата нужен читаемый идентификатор. Блоки опрашиваются всеми путями, которые используют «Вася диагност» и Abrites: KWP2000 по K-line (fast init, 5-бод 10400 и 9600) и VW TP2.0/TP1.6 по CAN. Опрос только читает ответы и не стирает ошибки, не кодирует блоки и не запускает исполнительные механизмы. Полная трасса сохраняет команды, ответы, таймауты и итоги.")
+            Text("Зелёная отметка означает, что блок вернул идентификатор. Команды и ответы сохраняются в полной трассе.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -445,20 +446,20 @@ struct BlockScanView: View {
     @ViewBuilder
     private var scanButton: some View {
         Button {
-            if scanning {
+            if scanning && !sweeping {
                 link.stopBlockScan()
             } else {
                 link.scanAllBlocks(makeSettings())
             }
         } label: {
             HStack(spacing: 10) {
-                if scanning {
+                if scanning && !sweeping {
                     ProgressView().tint(.white)
                 } else {
                     Image(systemName: "antenna.radiowaves.left.and.right")
                         .font(.system(size: 18, weight: .bold))
                 }
-                Text(scanning ? "Остановить после текущей проверки" : "Опросить все блоки")
+                Text(scanning && !sweeping ? "Остановить после текущей проверки" : "Опросить блоки из профиля")
                     .font(.system(size: 16, weight: .bold))
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
@@ -466,10 +467,10 @@ struct BlockScanView: View {
             .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
             .padding(.horizontal, 16)
             .foregroundStyle(.white)
-            .background(scanning ? Color.orange : Color.cyan, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .background(scanning && !sweeping ? Color.orange : Color.cyan, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
         }
         .buttonStyle(.plain)
-        .disabled(link.elmState != .ok && !scanning)
+        .disabled(sweeping || (link.elmState != .ok && !scanning) || link.logging || link.clearAllState == .busy)
 
         if link.elmState != .ok && !scanning {
             Label("Сначала подключи ELM327 на главном экране.", systemImage: "exclamationmark.circle")
@@ -479,35 +480,47 @@ struct BlockScanView: View {
     }
 
     private var sweepCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let report = link.addressSweep
+        return VStack(alignment: .leading, spacing: 8) {
             Label("Глубокий поиск адресов", systemImage: "scope")
                 .font(.system(size: 14, weight: .semibold))
-            Text("Fast init startCommunication по каждому физическому адресу 0x01–0x7F (~3 мин). Так на этом Cayenne нашлись двигатель (0x10) и приборка (0x61): если блок сидит на нестандартном адресе, он ответит здесь. Только чтение идентификатора.")
+            Text("В базе все 256 значений от 0x00 до 0xFF. Сначала проверяются KESSY, BCM и блок комфорта, затем весь диапазон по K-line и CAN TP2.0/TP1.6. Поиск читает идентификаторы и может занять несколько часов. Его можно приостановить и продолжить в этом подключении.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Button {
-                link.sweepFastInitAddresses(makeSettings())
+                if sweeping { link.stopBlockScan() } else { link.findRespondingAddresses() }
             } label: {
-                Text("Найти все отвечающие адреса")
+                Text(sweeping ? "Приостановить поиск" : (report.phase == .paused ? "Продолжить поиск" : "Найти все отвечающие блоки"))
                     .font(.system(size: 14, weight: .bold))
-                    .frame(maxWidth: .infinity, minHeight: 40)
+                    .frame(maxWidth: .infinity, minHeight: 48)
                     .foregroundStyle(.white)
-                    .background(Color.indigo, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(sweeping ? Color.orange : Color.indigo, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(.plain)
-            .disabled(link.elmState != .ok || scanning)
-            Text(link.sweepStatus)
+            .disabled(!sweeping && (link.elmState != .ok || scanning || link.logging || link.clearAllState == .busy))
+            if report.phase != .idle {
+                ProgressView(value: Double(report.position), total: Double(SweepRoute.plan.count))
+                Text("Проверено адресов хотя бы одним способом: \(report.attemptedAddresses) / \(SweepRoute.addresses.count)")
+                    .font(.footnote.monospacedDigit())
+                Text("K-line \(report.kLineAddresses.count)/255 · TP2.0 \(report.tp20Addresses.count)/255 · TP1.6 \(report.tp16Addresses.count)/255")
+                    .font(.caption.monospacedDigit())
+                Text("Маршруты: \(report.position) / \(SweepRoute.plan.count) · недоступно: \(report.skipped)")
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                Text("Адрес самого тестера на K-line — 0xF1, на CAN TP — 0x00. Каждый из них проверяется на другой шине.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text(report.status)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if !link.sweepFound.isEmpty {
-                ForEach(link.sweepFound, id: \.self) { line in
-                    Text(line)
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.green)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+            ForEach(report.findings) { result in
+                Label(result.route.label, systemImage: result.hasIdentity ? "checkmark.circle.fill" : "questionmark.circle")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(result.hasIdentity ? Color.green : Color.orange)
+                Text(result.detail)
+                    .font(.caption.monospaced())
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(14)
