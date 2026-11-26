@@ -1,6 +1,11 @@
 import SwiftUI
 import UIKit
 
+enum DiagnosticPage: Hashable {
+    case module(DtcModule)
+    case blockScan
+}
+
 struct ErrorsView: View {
     @ObservedObject var link: Me7Link
     let makeSettings: () -> Settings
@@ -55,9 +60,7 @@ struct ErrorsView: View {
 
                 LazyVGrid(columns: columns, spacing: 11) {
                     ForEach(DtcModule.allCases.filter { $0.isBase || link.discovered.contains($0) }) { module in
-                        NavigationLink {
-                            ModuleErrorsView(link: link, module: module, makeSettings: makeSettings)
-                        } label: {
+                        NavigationLink(value: DiagnosticPage.module(module)) {
                             ModuleTile(module: module, diagnostic: link.moduleDiagnostics[module] ?? ModuleDiagnostic())
                         }
                         .buttonStyle(.plain)
@@ -72,9 +75,7 @@ struct ErrorsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                NavigationLink {
-                    BlockScanView(link: link, makeSettings: makeSettings)
-                } label: {
+                NavigationLink(value: DiagnosticPage.blockScan) {
                     HStack(spacing: 12) {
                         Image(systemName: "dot.radiowaves.left.and.right")
                             .font(.system(size: 19, weight: .semibold))
@@ -111,6 +112,12 @@ struct ErrorsView: View {
         }
         .background(Color(uiColor: .systemGroupedBackground))
         .navigationTitle("Ошибки")
+        .navigationDestination(for: DiagnosticPage.self) { page in
+            switch page {
+            case .module(let module): ModuleErrorsView(link: link, module: module, makeSettings: makeSettings)
+            case .blockScan: BlockScanView(link: link, makeSettings: makeSettings)
+            }
+        }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .confirmationDialog("Удалить ошибки из всех блоков?", isPresented: $confirmClearAll, titleVisibility: .visible) {

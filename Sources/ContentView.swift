@@ -4,18 +4,18 @@ import UIKit
 struct ContentView: View {
     @StateObject private var link = Me7Link()
     @AppStorage("vars") private var varsCsv = ""
-    @State private var page: MainPage = .connection
+    @StateObject private var navigation = CarouselNavigation()
     @State private var showAdapterError = false
 
     var body: some View {
         VStack(spacing: 0) {
-            MainCarousel(link: link, selection: $page)
+            MainCarousel(link: link, navigation: navigation)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            CarouselBar(selection: $page)
+            CarouselBar(selection: navigation.visiblePage, select: navigation.select)
         }
         .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
         .onChange(of: link.elmState) { state in
-            if state == .fail && page == .connection { showAdapterError = true }
+            if state == .fail && navigation.visiblePage == .connection { showAdapterError = true }
         }
         .alert("Нет связи с ELM327", isPresented: $showAdapterError) {
             Button("Закрыть", role: .cancel) {}
@@ -36,6 +36,7 @@ struct ContentView: View {
 struct MainScreen: View {
     let page: MainPage
     @ObservedObject var link: Me7Link
+    @ObservedObject var navigation: CarouselNavigation
     @AppStorage("host") private var host = "192.168.0.10"
     @AppStorage("port") private var port = "35000"
     @AppStorage("proto") private var proto = "4"
@@ -67,7 +68,9 @@ struct MainScreen: View {
         case .connection:
             CayenneConnectionView(link: link, makeSettings: settings)
         case .errors:
-            NavigationStack { ErrorsView(link: link, makeSettings: settings) }
+            NavigationStack(path: $navigation.errorPath) {
+                ErrorsView(link: link, makeSettings: settings)
+            }
         case .logs:
             NavigationStack {
                 LoggingScreen(link: link, varsCsv: $varsCsv, showVars: $showVars, makeSettings: settings, applyPreset: preset)
