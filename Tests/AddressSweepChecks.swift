@@ -48,7 +48,7 @@ enum AddressSweepChecks {
             (.kessy, 0xC4, "3D0909135K  "),
         ]
         for (module, address, number) in traced {
-            let payload = number.utf8.map(Int.init)
+            let payload = number.utf8.map { Int($0) }
             precondition(module.isBase && module.fastInitTargets.first == address)
             precondition(module.matchesIdentification(payload))
             var found = SweepReply(kLineAddress: address)
@@ -56,7 +56,7 @@ enum AddressSweepChecks {
             precondition(found.module == module)
         }
         // The seat component's part number alone cannot distinguish the two sides.
-        let seat = "7L0959760   Sitzverstellung".utf8.map(Int.init)
+        let seat = "7L0959760   Sitzverstellung".utf8.map { Int($0) }
         precondition(Dtc.identifyModule(seat, kLineAddress: 0xA2) == nil)
         precondition(Dtc.identifyModule(seat) == nil)
         precondition(!DtcModule.seatDriver.isBase && !DtcModule.seatPassenger.isBase)
