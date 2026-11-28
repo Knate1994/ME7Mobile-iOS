@@ -91,6 +91,7 @@ struct SweepRoute: Hashable {
 }
 
 struct SweepReply {
+    var kLineAddress: Int?
     var payload: [Int]?
     var identifier: String?
     var evidence: String?
@@ -98,7 +99,7 @@ struct SweepReply {
     var unsupportedCAN = false
     var setupIssue: String?
     var attempted = false
-    var module: DtcModule? { payload.flatMap(Dtc.identifyModule) }
+    var module: DtcModule? { payload.flatMap { Dtc.identifyModule($0, kLineAddress: kLineAddress) } }
 
     // ATH1 includes the checksum. Check both addresses, the encoded length and checksum
     // before attributing K-line data to this route. Ignore request echoes and unrelated ECUs.
@@ -133,7 +134,7 @@ struct SweepReply {
                   normalized != "HARDWARENO" else {
                 evidence = "общий ответ на 1A\(hx(option))"; continue
             }
-            if payload == nil || (module == nil && Dtc.identifyModule(data) != nil) {
+            if payload == nil || (module == nil && Dtc.identifyModule(data, kLineAddress: kLineAddress) != nil) {
                 payload = data
                 identifier = "1A\(hx(option)) · \(text)"
             }

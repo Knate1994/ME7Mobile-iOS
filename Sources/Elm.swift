@@ -265,7 +265,7 @@ final class Elm {
 
     /// Probe a physical/logical route with ECU identification requests in the default session.
     func probeIdentity(on route: SweepRoute, stopped: () -> Bool) throws -> SweepReply {
-        var result = SweepReply()
+        var result = SweepReply(kLineAddress: route.rate == nil ? nil : route.address)
         guard !stopped() else { return result }
         var verifiedKLine = false
         switch route.mode {

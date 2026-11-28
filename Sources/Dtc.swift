@@ -21,6 +21,7 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
     case leftHeadlight
     case diffLock
     case seatDriver
+    case seatAdjustment
     case navigation
     case rightHeadlight
     case laneAssist
@@ -51,6 +52,7 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
         var subtitle: String? = nil
         var fastInit: [Int]? = nil
         var hint: String? = nil
+        var identificationNumber: String? = nil
     }
 
     private var info: Info {
@@ -65,7 +67,7 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
         case .absEsp:
             return Info(title: "ABS / ESP (PSM)", symbol: "car.fill", address: 0x03,
                         subtitle: "MK25 · K-line 0x\(hx(Self.mk25PhysicalAddress))",
-                        fastInit: [Self.mk25PhysicalAddress])
+                        fastInit: [Self.mk25PhysicalAddress], identificationNumber: "7L0 907 379 C")
         case .suspension:
             return Info(title: "Пневмоподвеска", symbol: "arrow.up.and.down", address: 0x34,
                         subtitle: "LUFTFDR/CDC · адреса 38/39", fastInit: [0x38, 0x39, 0x34],
@@ -76,10 +78,13 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
         case .transferCase:
             return Info(title: "Раздаточная коробка", symbol: "gear", address: 0x1C,
                         subtitle: "TRANSFERCASE · адрес 1C", fastInit: [0x1C, 0x22])
-        case .kessy: return Info(title: "KESSY · доступ и запуск", symbol: "key.fill", address: 0x05)
+        case .kessy: return Info(title: "KESSY · доступ и запуск", symbol: "key.fill", address: 0x05,
+                                 fastInit: [0xC4, 0x05], identificationNumber: "3D0 909 135 K")
         case .seatPassenger: return Info(title: "Память пассажирского сиденья", symbol: "person.fill", address: 0x06)
-        case .climate: return Info(title: "Климат-контроль", symbol: "fan.fill", address: 0x08)
-        case .onboardSupply: return Info(title: "BCM · бортовая электрика", symbol: "bolt.fill", address: 0x09)
+        case .climate: return Info(title: "Климат-контроль", symbol: "fan.fill", address: 0x08,
+                                   fastInit: [0x98, 0x08], identificationNumber: "7L5 907 040 AF")
+        case .onboardSupply: return Info(title: "BCM · бортовая электрика", symbol: "bolt.fill", address: 0x09,
+                                         fastInit: [0xA4, 0x09], identificationNumber: "7L5 937 049 C")
         case .cruiseControl: return Info(title: "Круиз-контроль", symbol: "timer", address: 0x11)
         case .distanceControl: return Info(title: "Контроль дистанции", symbol: "dot.radiowaves.left.and.right", address: 0x13)
         case .airbag: return Info(title: "Airbag / SRS", symbol: "shield.fill", address: 0x15,
@@ -93,6 +98,10 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
         case .leftHeadlight: return Info(title: "Левая фара", symbol: "headlight.high.beam.fill", address: 0x29)
         case .diffLock: return Info(title: "Блокировка дифференциала", symbol: "lock.rotation", address: 0x32)
         case .seatDriver: return Info(title: "Память водительского сиденья", symbol: "person.fill", address: 0x36)
+        case .seatAdjustment:
+            // The trace identifies this physical K-line target but does not identify the seat side.
+            return Info(title: "Регулировка сиденья", symbol: "person.fill", address: 0xA1,
+                        identificationNumber: "7L0 959 760")
         case .navigation: return Info(title: "Навигация / PCM", symbol: "map.fill", address: 0x37)
         case .rightHeadlight: return Info(title: "Правая фара", symbol: "headlight.high.beam.fill", address: 0x39)
         case .laneAssist: return Info(title: "Ассистент перестроения", symbol: "road.lanes", address: 0x3C)
@@ -103,7 +112,8 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
         case .tvTuner: return Info(title: "ТВ-тюнер", symbol: "tv.fill", address: 0x57)
         case .steeringAngle: return Info(title: "Датчик угла поворота руля", symbol: "rotate.right.fill", address: 0x64)
         case .tirePressure: return Info(title: "Контроль давления шин", symbol: "exclamationmark.circle", address: 0x65)
-        case .wipers: return Info(title: "Стеклоочистители", symbol: "drop.fill", address: 0x68)
+        case .wipers: return Info(title: "Стеклоочистители", symbol: "drop.fill", address: 0x68,
+                                  fastInit: [0xA6, 0x68], identificationNumber: "7L0 955 119 F")
         case .towBar: return Info(title: "Фаркоп / прицеп", symbol: "link", address: 0x69)
         case .rearCamera: return Info(title: "Камера заднего вида", symbol: "camera.fill", address: 0x6C)
         case .tailgate: return Info(title: "Электропривод задней двери", symbol: "rectangle.portrait.and.arrow.forward", address: 0x6D)
@@ -117,9 +127,20 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
     }
 
     var title: String { info.title }
-    var subtitle: String { info.subtitle ?? "KWP2000 · адрес \(target)" }
+    var subtitle: String {
+        if let subtitle = info.subtitle { return subtitle }
+        if let number = identificationNumber { return "\(number) · K-line 0x\(hx(fastInitTargets[0]))" }
+        return "KWP2000 · адрес \(target)"
+    }
+    var identificationNumber: String? { info.identificationNumber }
+    func matchesIdentification(_ payload: [Int]) -> Bool {
+        guard let number = identificationNumber else { return false }
+        let pattern = "^" + number.split(separator: " ").joined(separator: "[ -]*") + "(?![A-Z0-9])"
+        let text = String(decoding: payload.map { UInt8(clamping: $0) }, as: UTF8.self)
+        return text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
     var symbol: String { info.symbol }
-    /// VAG/KWP logical diagnostic address.
+    /// Diagnostic profile address, or the verified physical address for a K-line-only entry.
     var address: Int { info.address }
     /// VAG/KWP target address used in physical ECU requests.
     var target: String { hx(info.address) }
@@ -128,14 +149,12 @@ enum DtcModule: String, CaseIterable, Identifiable, Hashable {
     var sessions: [String] { ["1089", "1086", "1003", "-"] }
     var protocolHint: String? { info.hint }
 
-    /// Blocks always shown on the errors screen: everything this Cayenne 955 provably
-    /// answered from in the traces (двигатель 0x10, АКПП 0x1A, раздатка 0x1C,
-    /// рулевая колонка 0x30, пневмоподвеска 0x38/0x39, шлюз 0x40, Airbag 0x58,
-    /// парктроник 0x60, приборка 0x61, стеклоочистители 0x68, ABS/PSM 0x28).
+    /// Modules confirmed on this Cayenne and always visible on the errors screen.
     var isBase: Bool {
         switch self {
         case .engine, .transmission, .absEsp, .suspension, .transferCase, .wipers,
-             .steeringColumn, .gateway, .airbag, .parkAssist, .cluster: return true
+             .steeringColumn, .gateway, .airbag, .parkAssist, .cluster,
+             .kessy, .climate, .onboardSupply, .seatAdjustment: return true
         default: return false
         }
     }
@@ -178,6 +197,10 @@ struct BlockScanTarget: Identifiable, Hashable {
         self.fastInitTargets = fastInitTargets ?? [address]
     }
 
+    init(_ module: DtcModule) {
+        self.init(address: module.address, title: module.title, fastInitTargets: module.fastInitTargets)
+    }
+
     var id: Int { address }
     var addressText: String { String(format: "%02X", address) }
 
@@ -186,11 +209,11 @@ struct BlockScanTarget: Identifiable, Hashable {
     /// physical addresses (АКПП 0x1A, рулевая колонка 0x30, пневма 0x38/0x39, шлюз 0x40,
     /// Airbag 0x58, парктроник 0x60, приборка 0x61) and are no longer probed here.
     static let cayenne955: [BlockScanTarget] = [
-        .init(address: DtcModule.absEsp.address, title: DtcModule.absEsp.title, fastInitTargets: DtcModule.absEsp.fastInitTargets),
-        .init(address: 0x05, title: "KESSY · доступ и запуск"),
+        .init(.absEsp),
+        .init(.kessy),
         .init(address: 0x06, title: "Память пассажирского сиденья"),
-        .init(address: 0x08, title: "Климат-контроль"),
-        .init(address: 0x09, title: "Бортовая электрика"),
+        .init(.climate),
+        .init(.onboardSupply),
         .init(address: 0x11, title: "Круиз-контроль · дополнительный ЭБУ"),
         .init(address: 0x13, title: "Контроль дистанции"),
         .init(address: 0x18, title: "Дополнительный отопитель"),
@@ -279,7 +302,7 @@ enum Dtc {
     /// Recognizes the answering block by its 1A9B identification payload. On this Cayenne
     /// the blocks sit on Porsche-specific physical addresses (АКПП 0x1A, пневма 0x38/0x39…),
     /// so the address alone cannot say which module answered — the ID bytes can.
-    static func identifyModule(_ payload: [Int]) -> DtcModule? {
+    static func identifyModule(_ payload: [Int], kLineAddress: Int? = nil) -> DtcModule? {
         let text = String(bytes: payload.filter { (0x20...0x7E).contains($0) }.map { UInt8($0) },
                           encoding: .ascii)?.lowercased() ?? ""
         let rawText = String(decoding: payload.map { UInt8(clamping: $0) }, as: UTF8.self)
@@ -288,6 +311,10 @@ enum Dtc {
         if partNumber.contains("7l6937049") { return .onboardSupply }
         if rawText.range(of: #"7L0[ -]*907[ -]*379[ -]*C(?![A-Z])"#,
                          options: [.regularExpression, .caseInsensitive]) != nil { return .absEsp }
+        for module in [DtcModule.climate, .onboardSupply, .wipers, .seatAdjustment] {
+            if module == .seatAdjustment && kLineAddress != module.address { continue }
+            if module.matchesIdentification(payload) { return module }
+        }
         let markers: [(String, DtcModule)] = [
             ("kessy", .kessy),
             ("bordnetz", .onboardSupply),

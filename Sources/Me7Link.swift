@@ -101,7 +101,7 @@ final class Me7Link: ObservableObject {
     // Only the ELM worker accesses the checkpoint, scoped to its current TCP connection.
     private var pausedSweep: SweepCheckpoint?
     /// Blocks that provably answered during this ELM connection (scan or direct connect).
-    /// Shown on the errors screen next to the four base modules.
+    /// Shown on the errors screen alongside the permanent module tiles.
     @Published var discovered: Set<DtcModule> = []
     @Published var traceFileURL: URL?
     @Published var logging = false
@@ -187,7 +187,7 @@ final class Me7Link: ObservableObject {
     }
 
     /// Blocks offered for the mass clear: everything that answered during this connection,
-    /// or just the four base blocks until the first scan/connection finds anything.
+    /// or the permanent modules until the first scan/connection finds anything.
     var clearableModules: [DtcModule] {
         let found = DtcModule.allCases.filter { discovered.contains($0) }
         return found.isEmpty ? DtcModule.allCases.filter(\.isBase) : found
@@ -523,37 +523,48 @@ final class Me7Link: ObservableObject {
         }
         activeModule = nil
         setEcu(.idle, "Двигатель не выбран для текущей диагностики")
-        let target = module == .absEsp ? hx(DtcModule.mk25PhysicalAddress) : module.target
+        let target = module.target
+        let firstTarget = module.identificationNumber == nil ? target : hx(module.fastInitTargets[0])
         updateModule(module) {
             $0.connectionState = .busy
-            $0.connectionText = "Подключение к блоку 0x\(target)…"
+            $0.connectionText = "Подключение к блоку 0x\(firstTarget)…"
             $0.softwareNumber = "Чтение…"
             $0.dtcState = .idle
             $0.dtcText = "Ошибки не прочитаны"
             $0.codes = []
         }
-        t("=== подключение: \(module.title), адрес 0x\(target) ===")
+        t("=== подключение: \(module.title), адрес 0x\(firstTarget) ===")
 
-        if module == .absEsp {
-            let frames = try e.fastInitIdentification(header: "81\(target)F1")
-            guard frames.contains(where: { frame in
-                frame.bytes.starts(with: [0x5A, 0x9B]) &&
-                    Dtc.identifyModule(Array(frame.bytes.dropFirst(2))) == .absEsp
-            }) else {
+        var mismatchedHeader: String?
+        if let number = module.identificationNumber {
+            let header = "81\(firstTarget)F1"
+            let frames = try e.fastInitIdentification(header: header)
+            let identities = frames.filter { $0.bytes.starts(with: [0x5A, 0x9B]) && $0.bytes.count > 2 }
+            let identified = identities.contains { frame in
+                let payload = Array(frame.bytes.dropFirst(2))
+                if module == .absEsp { return Dtc.identifyModule(payload) == .absEsp }
+                return module.matchesIdentification(payload)
+            }
+            if identified {
+                activeModule = module
+                ui { _ = self.discovered.insert(module) }
+                let status = "Подключено · K-line fast init 0x\(firstTarget)"
+                updateModule(module) {
+                    $0.connectionState = .ok
+                    $0.connectionText = status
+                    $0.softwareNumber = number
+                }
+                t("\(module.title): \(status) · \(number)")
+                return true
+            }
+            // MK25 and the side-unassigned seat have no alternative confirmed target.
+            if module == .absEsp || module == .seatAdjustment {
                 let reply = frames.map(\.description).joined(separator: " · ")
-                moduleConnectionFail(module, "MK25 на 0x\(target) не подтвердил номер блока. 1A9B → \(reply.isEmpty ? "нет ответа" : reply)")
+                let name = module == .absEsp ? "MK25" : module.title
+                moduleConnectionFail(module, "\(name) на 0x\(firstTarget) не подтвердил номер блока. 1A9B → \(reply.isEmpty ? "нет ответа" : reply)")
                 return false
             }
-            activeModule = module
-            ui { _ = self.discovered.insert(module) }
-            let status = "Подключено · K-line fast init 0x\(target)"
-            updateModule(module) {
-                $0.connectionState = .ok
-                $0.connectionText = status
-                $0.softwareNumber = "7L0 907 379 C"
-            }
-            t("\(module.title): \(status) · 7L0 907 379 C")
-            return true
+            if !identities.isEmpty { mismatchedHeader = header }
         }
 
         var links = module.fastInitTargets.map { Link(proto: "5", initAddress: "", header: "81\(hx($0))F1") }
@@ -566,6 +577,7 @@ final class Me7Link: ObservableObject {
             links.removeAll { $0 == known }
             links.insert(known, at: 0)
         }
+        if let mismatchedHeader { links.removeAll { $0.header == mismatchedHeader } }
         var failures: [String] = []
         for link in links {
             // The clone often needs several 5-baud attempts before the init sticks
@@ -1159,8 +1171,8 @@ final class Me7Link: ObservableObject {
             guard try connectModuleOnWorker(module, e, s) else { return reply }
             reply = try send()
         }
-        // Identification works in the default MK25 session. Switch only if the requested DTC service requires it.
-        if module == .absEsp, reply.negative, reply.bytes[1] == service, [0x7E, 0x7F, 0x80].contains(reply.bytes[2]) {
+        // Blocks identified in the default session may require another session for a DTC service.
+        if module.identificationNumber != nil, reply.negative, reply.bytes[1] == service, [0x7E, 0x7F, 0x80].contains(reply.bytes[2]) {
             let (session, _) = try startSession(e, module.sessions.filter { $0 != "-" })
             if session != nil { reply = try send() }
         }

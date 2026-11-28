@@ -40,6 +40,28 @@ enum AddressSweepChecks {
         precondition(reply.module == .onboardSupply)
         precondition(Dtc.identifyModule("3D0-909-135 N".utf8.map(Int.init)) == .kessy)
         precondition(Dtc.identifyModule("unknown ECU".utf8.map(Int.init)) == nil)
+        let traced: [(DtcModule, Int, String)] = [
+            (.climate, 0x98, "7L5907040AF "),
+            (.seatAdjustment, 0xA1, "7L0959760   "),
+            (.onboardSupply, 0xA4, "7L5937049C  "),
+            (.wipers, 0xA6, "7L0955119F  "),
+            (.kessy, 0xC4, "3D0909135K  "),
+        ]
+        for (module, address, number) in traced {
+            let payload = number.utf8.map(Int.init)
+            precondition(module.isBase && module.fastInitTargets.first == address)
+            precondition(module.matchesIdentification(payload))
+            var found = SweepReply(kLineAddress: address)
+            found.inspect([Response(bytes: [0x5A, 0x9B] + payload, errors: [])], option: 0x9B)
+            precondition(found.module == module)
+        }
+        // The seat component's part number alone cannot distinguish the two sides.
+        let seat = "7L0959760   Sitzverstellung".utf8.map(Int.init)
+        precondition(Dtc.identifyModule(seat, kLineAddress: 0xA2) == nil)
+        precondition(Dtc.identifyModule(seat) == nil)
+        precondition(!DtcModule.seatDriver.isBase && !DtcModule.seatPassenger.isBase)
+        precondition(DtcModule.wipers.fastInitTargets.contains(0x68))
+        precondition(!DtcModule.onboardSupply.matchesIdentification("7L5937049CA".utf8.map(Int.init)))
         print("Verified \(plan.count) unique routes, 256 diagnostic address values, KWP reply validation and ECU identification.")
     }
 }
